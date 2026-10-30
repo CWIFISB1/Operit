@@ -1,7 +1,10 @@
 package com.ai.assistance.operit.core.tools.defaultTool.websession.browser.camoufox
 
 import android.content.Context
+import com.ai.assistance.operit.core.tools.system.Terminal
+import com.ai.assistance.operit.terminal.provider.type.HiddenExecResult
 import com.ai.assistance.operit.util.AppLogger
+import kotlinx.coroutines.runBlocking
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -47,6 +50,8 @@ internal object CamoufoxLauncher {
     @Volatile private var runningPort = 0
     @Volatile private var runningPid = -1
     @Volatile private var lastError: String? = null
+    /** execQuiet 需要 applicationContext 才能拿 Terminal 实例。 */
+    @Volatile private var contextRef: android.content.Context? = null
 
     /**
      * 确保 camoufox 在跑。
@@ -54,6 +59,7 @@ internal object CamoufoxLauncher {
      * @return 可用的 BiDi 端口，失败返回 0。
      */
     fun launch(context: Context, fp: CamoufoxFingerprint, binaryPath: String? = null): Int {
+        contextRef = context.applicationContext
         if (launched && runningPort > 0 && isPortAlive(runningPort)) {
             AppLogger.i(TAG, "复用已运行的 camoufox，端口 $runningPort")
             return runningPort
@@ -107,8 +113,17 @@ internal object CamoufoxLauncher {
         fp: CamoufoxFingerprint
     ): String {
         val sb = StringBuilder()
-        sb.append("DISPLAY=$DEFAULT_DISPLAY ")
+        sb.append("DISPLAY=").append(DEFAULT_DISPLAY).append(' ')
+        // 2026-10-30 实测（真机 proot）：不带这些参数时 camoufox 内容进程反复
+        // SIGSEGV(signal 11)，日志刷 "Sandbox: Couldn't list /dev" 与
+        // "process N exited on signal 11"，BiDi 端口永远不起来。
+        // proot 里 /dev 不完整、user namespace 受限，Firefox 的多层沙箱无法初始化。
+        sb.append("MOZ_DISABLE_CONTENT_SANDBOX=1 ")
+        sb.append("MOZ_DISABLE_GMP_SANDBOX=1 ")
+        sb.append("MOZ_DISABLE_GPU_SANDBOX=1 ")
+        sb.append("MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 ")
         sb.append(bin)
+        sb.append(" --no-sandbox")
         sb.append(" --marionette")
         sb.append(" --remote-debugging-port=").append(port)
         sb.append(" --remote-allow-system-access")
@@ -154,24 +169,45 @@ internal object CamoufoxLauncher {
         return true
     }
 
-    /** 走 super_admin 终端跑一条命令（同步取输出）。 */
+    /**
+     * 执行一条命令（同步取输出）。
+     *
+     * 2026-10-30 修复（关键）：原实现用 `ProcessBuilder("sh", "-c", cmd)`，
+     * 在 Android 应用进程里这走的是 **/system/bin/sh**，根目录是 Android 根，
+     * 既看不到 proot 的 /root/.camoufox，也不会应用 CAMOU_CONFIG 环境变量。
+     * 后果链：resolveBinary 找不到二进制 → lastError="找不到 camoufox 二进制"
+     * → launch 返回 0 → cloakReady()=false → 全部 browser_* 工具走 WebView。
+     * 必须改用 Terminal.executeHiddenCommand（平台唯一的 proot 执行通道），
+     * 与 CloakLauncher 保持一致。
+     */
     private fun execQuiet(cmd: String): String {
-        return try {
-            val pb = ProcessBuilder("sh", "-c", cmd)
-            pb.redirectErrorStream(true)
-            val proc = pb.start()
-            val out = StringBuilder()
-            BufferedReader(InputStreamReader(proc.inputStream)).use { r ->
-                var line = r.readLine()
-                while (line != null && out.length < 8192) {
-                    out.append(line).append('\n')
-                    line = r.readLine()
+        // 走 proot 隐藏终端通道。Terminal.executeHiddenCommand 是 suspend，
+        // 用 runBlocking 同步等待（调用点都在后台线程，不会卡主线程）。
+        // 为什么不能用 ProcessBuilder("sh","-c")：那是 Android 的 /system/bin/sh，
+        // 根目录是 Android 根，看不到 proot 的 /root/.camoufox，
+        // 也不会应用 CAMOU_CONFIG 环境变量，指纹注入会整段失效。
+        return runCatching {
+            runBlocking {
+                val ctx = contextRef
+                if (ctx == null) {
+                    AppLogger.w(TAG, "contextRef 为空，无法走 proot 通道")
+                    return@runBlocking ""
+                }
+                val terminal = Terminal.getInstance(ctx)
+                val r: HiddenExecResult = terminal.executeHiddenCommand(
+                    command = cmd,
+                    executorKey = "camoufox_launcher",
+                    timeoutMs = 60_000L
+                )
+                if (r.isOk) {
+                    r.output.ifBlank { r.rawOutputPreview }
+                } else {
+                    AppLogger.w(TAG, "hidden exec 失败 state=" + r.state + " err=" + r.error)
+                    r.output.ifBlank { r.rawOutputPreview }
                 }
             }
-            proc.waitFor(10, TimeUnit.SECONDS)
-            out.toString().trim()
-        } catch (e: Throwable) {
-            AppLogger.w(TAG, "exec 失败: ${e.message}")
+        }.getOrElse {
+            AppLogger.e(TAG, "exec 异常: " + (it.message ?: ""), it)
             ""
         }
     }
@@ -210,23 +246,34 @@ internal object CamoufoxLauncher {
         return r.trim().toIntOrNull() ?: -1
     }
 
-    /** 按优先级找二进制。 */
+    /**
+     * 按优先级找二进制。
+     *
+     * 2026-10-30 修复（关键）：原实现用 File(c).isFile 判定。
+     * 本方法跑在 Android 应用进程，根目录是 Android 根，/root/.camoufox 在
+     * Android 视角不存在（proot 的 /root 才映射到
+     * files/usr/var/lib/proot-distro/installed-rootfs/ubuntu/root）。
+     * 结果 candidates 全部判不存在 -> 返回 null -> lastError="找不到 camoufox 二进制"。
+     * 修法：判定交给 proot 的 test -x，只看字符串路径，不用本进程 File。
+     */
     fun resolveBinary(explicit: String?): String? {
-        if (!explicit.isNullOrBlank()) {
-            val f = File(explicit)
-            if (f.isFile && f.canExecute()) return explicit
-        }
+        if (!explicit.isNullOrBlank() && prootTestExecutable(explicit)) return explicit
         val candidates = listOf(
             "/root/.camoufox/camoufox-bin",
             "/root/camoufox/camoufox-bin",
             "/opt/camoufox/camoufox-bin"
         )
         for (c in candidates) {
-            val f = File(c)
-            if (f.isFile && f.canExecute()) return c
+            if (prootTestExecutable(c)) return c
         }
         val which = execQuiet("command -v camoufox-bin || command -v camoufox")
         return which.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+    }
+
+    /** 在 proot 内判断路径是否可执行。 */
+    private fun prootTestExecutable(path: String): Boolean {
+        val out = execQuiet("test -x " + shellQuote(path) + " && echo YES || echo NO")
+        return out.contains("YES")
     }
 
     /** 状态快照。 */
