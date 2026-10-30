@@ -207,17 +207,78 @@ internal class CloakCdpClient(
         return runCatching { JSONObject(text) }.getOrNull()
     }
 
+    /**
+     * 读取 CDP 的 HTTP 端点（/json/list、/json/version）。
+     *
+     * 2026-10-30 修复（关键）：
+     * 原实现用 BufferedInputStream.readBytes() 读到 EOF 才返回。但 Chrome 的 DevTools HTTP
+     * 端点即使请求头带 Connection: close 也不会主动关连接，会一直挂到 soTimeout(10s) 才抛异常。
+     * 后果链：readBytes 抛 SocketTimeoutException -> runCatching 吞成 null -> httpJsonArray 返回空
+     * -> connectToFirstPage 抛 "no page target" -> ensureEngine 失败 -> cloakReady()=false
+     * -> 所有 browser_* 工具静默走 WebView 分支 -> evaluate/snapshot 8000ms 超时。
+     * 实测复现：请求 /json/list 用 10.04s 收到 3273 字节后超时，数据其实已完整到达。
+     *
+     * 修法：解析响应头 Content-Length，按长度精确读够 body 就返回，不依赖 EOF。
+     * 无 Content-Length 时回退到 Connection: close 语义（读到 EOF），再不行用已收数据兜底。
+     */
     private fun httpRequest(method: String, path: String): String? = runCatching {
         val s = Socket(host, port)
         s.soTimeout = 10_000
-        s.getOutputStream().apply {
-            write("$method $path HTTP/1.1\r\nHost: $host:$port\r\nConnection: close\r\n\r\n".toByteArray())
-            flush()
+        val out = s.getOutputStream()
+        out.write("$method $path HTTP/1.1\r\nHost: $host:$port\r\nConnection: close\r\n\r\n".toByteArray())
+        out.flush()
+        val input = BufferedInputStream(s.getInputStream())
+
+        // 1) 逐字节读响应头，直到空行
+        val headerBuf = ByteArrayOutputStream()
+        var tail = 0
+        while (true) {
+            val b = input.read()
+            if (b < 0) break
+            headerBuf.write(b)
+            tail = (tail shl 8) or b
+            if (tail == 0x0D0A0D0A) break
         }
-        val resp = BufferedInputStream(s.getInputStream()).readBytes().toString(Charsets.UTF_8)
-        s.close()
-        val idx = resp.indexOf("\r\n\r\n")
-        if (idx < 0) null else resp.substring(idx + 4)
+        val headerText = headerBuf.toString("UTF-8")
+        val sep = headerText.indexOf("\r\n\r\n")
+        if (sep < 0) return@runCatching null
+        val head = headerText.substring(0, sep)
+        val bodyAlready = headerText.substring(sep + 4)
+
+        // 2) 解析 Content-Length
+        var contentLength = -1
+        for (line in head.lineSequence()) {
+            val lower = line.lowercase()
+            if (lower.startsWith("content-length:")) {
+                contentLength = lower.removePrefix("content-length:").trim().toIntOrNull() ?: -1
+            }
+        }
+
+        // 3) 按长度读够 body；不够就继续读，够了立刻停手（不等 EOF）
+        val body = ByteArrayOutputStream()
+        if (bodyAlready.isNotEmpty()) body.write(bodyAlready.toByteArray(Charsets.UTF_8))
+        if (contentLength >= 0) {
+            while (body.size() < contentLength) {
+                val want = contentLength - body.size()
+                val buf = ByteArray(minOf(want, 8192))
+                val n = input.read(buf, 0, buf.size)
+                if (n < 0) break
+                body.write(buf, 0, n)
+            }
+        } else {
+            // 无 Content-Length：退回读到 EOF，但异常时用已收数据兜底
+            runCatching {
+                while (true) {
+                    val buf = ByteArray(8192)
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    body.write(buf, 0, n)
+                }
+            }
+        }
+        runCatching { s.close() }
+        val text = body.toString("UTF-8")
+        if (text.isBlank()) null else text
     }.getOrNull()
 
     // ---------------- high level API ----------------

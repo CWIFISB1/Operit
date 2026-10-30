@@ -240,6 +240,19 @@ internal object CloakLauncher {
             val logFile = "$LOG_ROOT/cloak_$port.log"
 
             proot(context, "mkdir -p $profileDir $LOG_ROOT 2>/dev/null", 20_000L)
+            // 残留进程清理（2026-10-30 补）。
+            // 实测故障：上一次启动失败后 chrome 主进程仍占着同一 profileDir，
+            // 新实例启动时 Chromium 把参数转交给已有实例，自己立刻退出，只往日志写一句
+            //   "Opening in existing browser session."
+            // 于是 waitPort(9301) 空等 35 秒，日志里却看不到任何错误原因。
+            // 修法：同一 profile 只允许一个 chrome；启动前先把该 profile 的旧进程清掉。
+            runCatching {
+                proot(
+                    context,
+                    "pkill -f 'user-data-dir=$profileDir' 2>/dev/null; sleep 1; echo cleaned",
+                    15_000L
+                )
+            }
 
             val args = buildList {
                 add(chrome)
