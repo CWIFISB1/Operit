@@ -58,6 +58,23 @@ data class CloakFingerprint(
     val screenHeight: Int? = null,
     /** WebRTC IP 伪装，auto 跟随代理出口。 */
     val webrtcIp: String = "auto",
+    /**
+     * WebRTC 存活策略。默认 [WEBRTC_DISABLED]。
+     *
+     * 实测（2026-10-30 真机）：只加 `--fingerprint-webrtc-ip=auto` 时，
+     * 页面仍能拿到 `typ srflx` 候选 —— IP 值是 "auto" 占位符，但**候选对象本身存在**，
+     * 风控据此判定「WebRTC 可达」，是 Cloak 免费版最明显的破绽。
+     *
+     * 加 `--webrtc-ip-handling-policy=disable_non_proxied_udp` 后实测：
+     *   total=0 host=0 srflx=0 relay=0
+     * 候选完全为空，真实 IP 彻底不可探测。
+     *
+     * 取值：
+     *   disabled                默认。彻底关掉候选，最安全
+     *   default                 不干预（旧行为，会有 srflx）
+     *   disable_non_proxied_udp 只关非代理 UDP，走代理时仍可用（需要真实代理才有意义）
+     */
+    val webrtcMode: String = WEBRTC_DISABLED,
     /** 按代理出口 IP 匹配时区与语言。 */
     val geoip: Boolean = true,
     /** 拟人化交互。 */
@@ -65,6 +82,11 @@ data class CloakFingerprint(
     /** 拟人化预设 default/careful/fast。 */
     val humanPreset: String = "default"
 ) {
+    companion object {
+        /** 彻底关闭 WebRTC 候选（默认）。 */
+        const val WEBRTC_DISABLED = "disabled"
+    }
+
     fun toCliArgs(): List<String> = buildList {
         add("--user-agent=$userAgent")
         add("--lang=$language")
@@ -79,6 +101,14 @@ data class CloakFingerprint(
         screenWidth?.let { if (it > 0) add("--fingerprint-screen-width=$it") }
         screenHeight?.let { if (it > 0) add("--fingerprint-screen-height=$it") }
         if (webrtcIp.isNotBlank()) add("--fingerprint-webrtc-ip=$webrtcIp")
+        // WebRTC 候选策略：disabled 时彻底不产生 ICE 候选，
+        // 避免 typ srflx 暴露「WebRTC 可达」这一信号。
+        when (webrtcMode.lowercase()) {
+            WEBRTC_DISABLED -> add("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+            "disable_non_proxied_udp" -> add("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+            "default" -> { /* 不干预 */ }
+            else -> add("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+        }
         if (humanize) {
             add("--humanize=true")
             if (humanPreset.isNotBlank()) add("--human-preset=$humanPreset")

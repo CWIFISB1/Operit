@@ -333,10 +333,19 @@ internal object CloakLauncher {
             runCatching {
                 cdp.setUserAgent(fingerprint.userAgent, fingerprint.platform)
                 cdp.setTimezone(fingerprint.timezone)
+                // 屏幕几何与窗口位置：不给的话 screen 会回落到视口尺寸，
+                // 且 screenX/screenY 会暴露 Android 悬浮窗的真实偏移。
                 cdp.setDeviceMetrics(
                     fingerprint.viewportWidth, fingerprint.viewportHeight,
-                    fingerprint.deviceScale, fingerprint.mobile
+                    fingerprint.deviceScale, fingerprint.mobile,
+                    screenWidth = fingerprint.screenWidth ?: 1920,
+                    screenHeight = fingerprint.screenHeight ?: 1080,
+                    positionX = 0,
+                    positionY = 0
                 )
+                // navigator.onLine：proot 里拿不到 Android 的网络状态，
+                // 不修的话页面明明能联网却报告 offline，是矛盾信号。
+                cdp.setOnline(true)
                 if (fingerprint.latitude != null && fingerprint.longitude != null) {
                     cdp.setGeolocation(fingerprint.latitude, fingerprint.longitude)
                 }

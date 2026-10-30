@@ -505,10 +505,67 @@ internal class CloakCdpClient(
         })
     }
 
-    fun setDeviceMetrics(width: Int, height: Int, scale: Double = 1.0, mobile: Boolean = false) {
+    /**
+     * 设置视口与屏幕几何。
+     *
+     * 除了 width/height，还必须显式给 screenWidth/screenHeight/positionX/positionY：
+     *
+     *  - 不给 screenWidth/screenHeight 时，CDP 会回落到「视口尺寸」，
+     *    于是 screen 是 1279x799 这种奇怪的数，而真实 Windows 桌面是 1920x1080，
+     *    两者不一致是明显的自动化信号。
+     *
+     *  - 不给 positionX/positionY 时，Firefox/Chromium 会把窗口真实位置暴露成
+     *    window.screenX/screenY。本项目里 Cloak 跑在 Android 悬浮窗上，
+     *    实测 screenX=201、screenY=225 —— 这个偏移是悬浮窗相对屏幕的位置，
+     *    真实桌面浏览器几乎不可能正好落在 (201,225)，属于可直接命中的破绽。
+     *
+     * 实测（2026-10-30 真机）修前：outer=1279x799, inner=1279x678,
+     * screenX=201, screenY=225。修后应变成 screen=1920x1080、screenX/Y=0。
+     */
+    fun setDeviceMetrics(
+        width: Int,
+        height: Int,
+        scale: Double = 1.0,
+        mobile: Boolean = false,
+        screenWidth: Int = 1920,
+        screenHeight: Int = 1080,
+        positionX: Int = 0,
+        positionY: Int = 0
+    ) {
         call("Emulation.setDeviceMetricsOverride", JSONObject().apply {
-            put("width", width); put("height", height)
-            put("deviceScaleFactor", scale); put("mobile", mobile)
+            put("width", width)
+            put("height", height)
+            put("deviceScaleFactor", scale)
+            put("mobile", mobile)
+            // 屏幕几何：与 device metrics 分开指定，避免回落到视口尺寸
+            put("screenWidth", screenWidth)
+            put("screenHeight", screenHeight)
+            // 窗口位置归零：遮掉 Android 悬浮窗的真实偏移
+            put("positionX", positionX)
+            put("positionY", positionY)
+            // 不启用屏幕朝向覆盖，否则会多出 orientation 字段
+            put("dontSetVisibleSize", false)
+        })
+    }
+
+    /**
+     * 修正 navigator.onLine。
+     *
+     * 实测问题：Cloak 跑在 proot 里，Android 侧的 ConnectivityManager 状态
+     * 传不进 Chromium 的网络栈，于是 navigator.onLine 返回 false，
+     * 但页面实际能正常联网 —— 这是自相矛盾的信号，风控会标记为异常环境
+     * （真实桌面浏览器只要加载出页面，onLine 必然是 true）。
+     *
+     * CDP 的 Network.emulateNetworkConditions 只要 offline=false 就会
+     * 让 onLine 变 true。这里顺手把延迟/带宽设成常见宽带值，
+     * 避免出现「0ms 延迟」这种 unrealistically perfect 的组合。
+     */
+    fun setOnline(online: Boolean = true) {
+        call("Network.emulateNetworkConditions", JSONObject().apply {
+            put("offline", !online)
+            put("latency", 20)              // 20ms，接近正常宽带 RTT
+            put("downloadThroughput", -1)   // -1 = 不限速
+            put("uploadThroughput", -1)
         })
     }
 
