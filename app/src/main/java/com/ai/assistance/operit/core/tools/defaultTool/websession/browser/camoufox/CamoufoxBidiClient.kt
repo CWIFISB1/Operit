@@ -8,6 +8,7 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -506,13 +507,20 @@ internal class CamoufoxBidiClient(
     fun drainEvents(methodPrefix: String, max: Int = 60): List<JSONObject> {
         val out = ArrayList<JSONObject>()
         synchronized(events) {
-            val it = events.iterator()
-            while (it.hasNext() && out.size < max) {
-                val e = it.next()
-                if (e.optString("method", "").startsWith(methodPrefix)) {
+            // 不用 iterator().remove()：kotlin.collections.ArrayDeque 的迭代器
+            // 不支持 remove，会抛 UnsupportedOperationException。
+            // 改成"筛出命中的，再重建剩余队列"，语义一致且各实现都安全。
+            val keep = ArrayDeque<JSONObject>()
+            while (events.isNotEmpty()) {
+                val e = events.pollFirst() ?: break
+                if (e.optString("method", "").startsWith(methodPrefix) && out.size < max) {
                     out.add(e)
-                    it.remove()
+                } else {
+                    keep.addLast(e)
                 }
+            }
+            while (keep.isNotEmpty()) {
+                events.addLast(keep.pollFirst()!!)
             }
         }
         return out
@@ -529,7 +537,7 @@ internal class CamoufoxBidiClient(
             put("network.responseCompleted")
             put("browsingContext.contextCreated")
             put("browsingContext.contextDestroyed")
-        })))
+        }))
     }
 
     /** 关闭标签页并收摊。 */
