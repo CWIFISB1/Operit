@@ -27,12 +27,12 @@
         {
             "name": "switch_engine",
             "description": {
-                "zh": "查询或切换当前浏览器标签页的渲染引擎。webview 为内置 Android WebView；cloak 为 proot 内反检测 Chromium（可绕过指纹检测）。",
-                "en": "Inspect or switch the rendering engine of the active tab. webview uses the built-in Android WebView; cloak uses the anti-detection Chromium inside proot."
+                "zh": "查询或切换当前浏览器标签页的渲染引擎。cloak 为 proot 内反检测 Chromium（Chromium 146，主力）；camoufox 为 proot 内反检测 Firefox（Firefox 158，备用）；webview 为系统内置 Android WebView（仅兜底）。",
+                "en": "Inspect or switch the rendering engine of the active tab. cloak uses the anti-detection Chromium (146) inside proot; camoufox uses the anti-detection Firefox (158) inside proot; webview uses the built-in Android WebView as a fallback only."
             },
             "parameters": [
                 { "name": "action", "description": { "zh": "status 查询 / switch 切换 / close 释放，默认 switch。", "en": "status to query, switch to change, close to release. Defaults to switch." }, "type": "string", "required": false },
-                { "name": "engine", "description": { "zh": "webview 或 cloak，默认 webview。", "en": "webview or cloak. Defaults to webview." }, "type": "string", "required": false },
+                { "name": "engine", "description": { "zh": "cloak、camoufox 或 webview。", "en": "cloak, camoufox or webview." }, "type": "string", "required": false },
                 { "name": "fingerprint", "description": { "zh": "可选指纹种子，数字或任意字符串（自动哈希）。", "en": "Optional fingerprint seed; numeric or any string (hashed automatically)." }, "type": "string", "required": false }
             ]
         },

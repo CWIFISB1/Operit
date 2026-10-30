@@ -220,8 +220,11 @@ fun getJsToolsDefinition(): String {
                     }
                     if (params.engine !== undefined && params.engine !== null) {
                         const engine = String(params.engine).trim().toLowerCase();
-                        if (engine !== 'webview' && engine !== 'cloak') {
-                            throw new Error("engine must be one of: webview, cloak");
+                        // 三引擎（2026-10-30）：cloak = Chromium 146 反检测，camoufox = Firefox 158 反检测，
+                        // webview = 系统内核（仅兜底）。原先这里只放行 webview/cloak，
+                        // 导致 camoufox 在 JS 桥接层就被拦掉，报 "engine must be one of: webview, cloak"。
+                        if (engine !== 'webview' && engine !== 'cloak' && engine !== 'camoufox') {
+                            throw new Error("engine must be one of: webview, cloak, camoufox");
                         }
                         params.engine = engine;
                     }
