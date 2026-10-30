@@ -65,6 +65,14 @@ class ConversationService(
     companion object {
         private const val TAG = "ConversationService"
         private const val APPLY_FILE_TOOL_NAME = "apply_file"
+
+        /**
+         * metadata 键：标记该 PromptTurn 是一个 think 段。
+         *
+         * 用 metadata 而不是新增 PromptTurnKind，是因为 PromptTurnKind 是
+         * 公共契约，加值会波及全仓所有 when 分支；metadata 是 Map，加键零影响。
+         */
+        private const val KEY_THINK_SEGMENT = "think_segment"
         private val fileRequestContentRegex = Regex(
             """<file-request-content\b[^>]*><!\[CDATA\[(.*?)\]\]></file-request-content>""",
             setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
@@ -752,8 +760,25 @@ class ConversationService(
             // 根据标签类型分配角色
             when (normalizedTagName) {
                 "think", "thinking" -> {
-                    // 保留完整的think标签（用于DeepSeek推理模式）
-                    segments.add(PromptTurn(kind = PromptTurnKind.ASSISTANT, content = tagContent))
+                    // 必须保留完整标签，不能只存标签内部内容。
+                    //
+                    // 下游两处都靠标签定边界：
+                    //   ChatUtils.thinkCapturePattern = <think(?:ing)?>([\s\S]*?)</think(?:ing)?>
+                    //     → 要求闭合，缺结束标签时提取结果为空，DeepSeek 的
+                    //       reasoning_content 直接丢失。
+                    //   ChatUtils.thinkContentPattern = <think(?:ing)?>.*?(</think(?:ing)?>|\z)
+                    //     → 缺开始标签时正文里会残留思考文本，被当普通内容发给模型。
+                    //
+                    // metadata 打标是为了让下面的合并逻辑识别它，
+                    // 避免和后续普通 ASSISTANT 段粘连。
+                    val wrapped = "<" + tagName + ">" + tagContent + "</" + tagName + ">"
+                    segments.add(
+                        PromptTurn(
+                            kind = PromptTurnKind.ASSISTANT,
+                            content = wrapped,
+                            metadata = mapOf(KEY_THINK_SEGMENT to true)
+                        )
+                    )
                 }
                 "status" -> {
                     // 判断status类型
@@ -790,9 +815,19 @@ class ConversationService(
         var currentMetadata: Map<String, Any?> = emptyMap()
 
         for (segment in segments) {
+            // think 段必须自成一条，理由：
+            //  - 和正文粘连后，removeThinkingContent 虽然仍能剥掉（正则跨行匹配），
+            //    但 extractThinkingContent 会把后面的正文一起算进 reasoning_content，
+            //    导致推理内容被污染、正文被凭空塞进 reasoning 字段。
+            //  - 多条 think 段互相粘连也一样有问题，边界丢失后无法按条处理。
+            // 判据：当前累积段是 think，或即将并入的段是 think，都不合并。
+            val currentIsThink = currentMetadata[KEY_THINK_SEGMENT] == true
+            val segmentIsThink = segment.metadata[KEY_THINK_SEGMENT] == true
             val shouldMergeCurrent =
                 segment.kind == currentKind &&
-                    segment.kind !in setOf(PromptTurnKind.TOOL_CALL, PromptTurnKind.TOOL_RESULT)
+                    segment.kind !in setOf(PromptTurnKind.TOOL_CALL, PromptTurnKind.TOOL_RESULT) &&
+                    !currentIsThink &&
+                    !segmentIsThink
             if (shouldMergeCurrent) {
                 // 如果角色与当前角色相同，则合并内容
                 currentContent.append("\n").append(segment.content)
