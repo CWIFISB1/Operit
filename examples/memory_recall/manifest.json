@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.memory_recall",
+  "version": "2.0.0",
+  "api_version": "1.0.1",
+  "main": "dist/main.js",
+  "author": [
+    "ko"
+  ],
+  "display_name": {
+    "zh": "记忆成长",
+    "en": "Memory Growth",
+    "default": "Memory Growth"
+  },
+  "description": {
+    "zh": "主动式记忆系统：AI 自己判断何时写入、何时检索、如何沉淀。三层结构 L1事件 → L2经验 → L3原则，艾宾浩斯复习，记忆进化留版本史。注入的只是索引与任务指令，正文始终不进上下文。",
+    "en": "Active memory: the AI decides when to write, when to retrieve, and how to consolidate. 3 layers L1 event -> L2 lesson -> L3 , Ebbinghaus review, versioned evolution. Only an index plus task instructions are injected; bodies never enter context.",
+    "default": "Active memory system with layered consolidation"
+  },
+  "enabled_by_default": true,
+  "subpackages": [
+    {
+      "id": "memory_growth_tools",
+      "entry": "dist/packages/memory_growth_tools.js",
+      "enabled_by_default": true,
+      "display_name": {
+        "zh": "记忆成长工具",
+        "en": "Memory Growth Tools",
+        "default": "Memory Growth Tools"
+      },
+      "description": {
+        "zh": "mem_write / mem_search / mem_consolidate / mem_evolve / mem_review / mem_mark_used / mem_stats / mem_audit / mem_merge_review / mem_merge_apply / mem_diag / mem_forget / mem_rollback / mem_lesson / mem_evolution / mem_supersede",
+        "en": "mem_write / mem_search / mem_consolidate / mem_evolve / mem_review / mem_mark_used / mem_stats / mem_audit / mem_merge_review / mem_merge_apply / mem_diag / mem_forget / mem_rollback / mem_lesson / mem_evolution / mem_supersede",
+        "default": "16 growth tools"
+      }
+    }
+  ]
+}
