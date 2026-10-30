@@ -57,7 +57,18 @@ data class CloakFingerprint(
     /** 屏幕高度。 */
     val screenHeight: Int? = null,
     /** WebRTC IP 伪装，auto 跟随代理出口。 */
-    val webrtcIp: String = "auto",
+    /**
+     * WebRTC IP 伪装值。**默认空 = 完全不传 `--fingerprint-webrtc-ip`**。
+     *
+     * 实测（2026-10-30，真机 Cloak 146，each 跑 2~3 次复现）：
+     *   传 auto / disabled / block / false / none / deny / off → 全部 total=2 host=1 srflx=1
+     *   完全省略该参数                                    → total=0 host=0 srflx=0
+     *
+     * 即：**这个参数一旦出现，不论取值，都会自己造出一个假 ICE 候选**，
+     * 风控只要看到 `typ srflx` 就判定「WebRTC 可达」。最干净的做法是彻底不传。
+     * 需要指定具体伪装 IP 时才显式赋非空值（此时接受候选存在这一代价）。
+     */
+    val webrtcIp: String = "",
     /**
      * WebRTC 存活策略。默认 [WEBRTC_DISABLED]。
      *
@@ -91,6 +102,14 @@ data class CloakFingerprint(
         add("--user-agent=$userAgent")
         add("--lang=$language")
         add("--window-size=$viewportWidth,$viewportHeight")
+        // 关于 screenX/screenY（2026-10-30 实测纠偏）：
+        //   CDP 的 Emulation.setDeviceMetricsOverride 带 positionX/positionY 时
+        //   调用成功但 window.screenX/Y 纹丝不动 —— 它确实改不了窗口位置。
+        //   但这**不构成指纹缺陷**：实测 availLeft/availTop 恒为 0，screen 与窗口尺寸
+        //   关系正常，screenX/Y 只是桌面显示器上的居中窗口坐标，真实用户窗口本就可任意摆放。
+        //   若强行注入 JS 改写 screenX getter，会破坏当前 toString 8/8 NATIVE 的原生性优势，
+        //   代价远大于收益，故此处不做任何覆盖。
+        add("--window-position=0,0")
         if (mobile) add("--fingerprint-mobile=true")
         fingerprintSeed?.let { add("--fingerprint=$it") }
         proxyServer?.let { add("--proxy-server=$it") }
@@ -100,14 +119,15 @@ data class CloakFingerprint(
         deviceMemory?.let { if (it > 0) add("--fingerprint-device-memory=$it") }
         screenWidth?.let { if (it > 0) add("--fingerprint-screen-width=$it") }
         screenHeight?.let { if (it > 0) add("--fingerprint-screen-height=$it") }
+        // 只有显式指定了具体 IP 才传：该参数一旦出现就会造出假候选（见 webrtcIp 注释）
         if (webrtcIp.isNotBlank()) add("--fingerprint-webrtc-ip=$webrtcIp")
-        // WebRTC 候选策略：disabled 时彻底不产生 ICE 候选，
-        // 避免 typ srflx 暴露「WebRTC 可达」这一信号。
+        // 命令行真正生效的是 force-webrtc-ip-handling-policy；
+        // 不带 force 的 --webrtc-ip-handling-policy 是偏好项名，会被静默忽略。
         when (webrtcMode.lowercase()) {
-            WEBRTC_DISABLED -> add("--webrtc-ip-handling-policy=disable_non_proxied_udp")
-            "disable_non_proxied_udp" -> add("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+            WEBRTC_DISABLED, "disable_non_proxied_udp" ->
+                add("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
             "default" -> { /* 不干预 */ }
-            else -> add("--webrtc-ip-handling-policy=disable_non_proxied_udp")
+            else -> add("--force-webrtc-ip-handling-policy=disable_non_proxied_udp")
         }
         if (humanize) {
             add("--humanize=true")

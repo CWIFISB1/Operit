@@ -333,8 +333,9 @@ internal object CloakLauncher {
             runCatching {
                 cdp.setUserAgent(fingerprint.userAgent, fingerprint.platform)
                 cdp.setTimezone(fingerprint.timezone)
-                // 屏幕几何与窗口位置：不给的话 screen 会回落到视口尺寸，
-                // 且 screenX/screenY 会暴露 Android 悬浮窗的真实偏移。
+                // 屏幕几何：不给 screenWidth/Height 时 screen 会回落到视口尺寸（如 1279x799），
+                // 与真实桌面 1920x1080 不一致，是明显自动化信号，必须显式指定。
+                // 注：positionX/Y 改不动 window.screenX/Y（实测已验证），传 0 仅表意图。
                 cdp.setDeviceMetrics(
                     fingerprint.viewportWidth, fingerprint.viewportHeight,
                     fingerprint.deviceScale, fingerprint.mobile,

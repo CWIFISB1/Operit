@@ -514,13 +514,18 @@ internal class CloakCdpClient(
      *    于是 screen 是 1279x799 这种奇怪的数，而真实 Windows 桌面是 1920x1080，
      *    两者不一致是明显的自动化信号。
      *
-     *  - 不给 positionX/positionY 时，Firefox/Chromium 会把窗口真实位置暴露成
-     *    window.screenX/screenY。本项目里 Cloak 跑在 Android 悬浮窗上，
-     *    实测 screenX=201、screenY=225 —— 这个偏移是悬浮窗相对屏幕的位置，
-     *    真实桌面浏览器几乎不可能正好落在 (201,225)，属于可直接命中的破绽。
+     *  - positionX/positionY 实测**改不动** window.screenX/screenY，
+     *    传了也白传（CDP 返回成功，但 screenX/Y 保持原值）。
+     *    screenX/Y 由窗口管理器决定，CDP 层无覆盖能力。
      *
-     * 实测（2026-10-30 真机）修前：outer=1279x799, inner=1279x678,
-     * screenX=201, screenY=225。修后应变成 screen=1920x1080、screenX/Y=0。
+     * 关于 screenX/screenY 是否算破绽（2026-10-30 复测纠偏）：
+     *    实测 availLeft=0、availTop=0、screen=1920x1080、窗口 1280x800，
+     *    screenX/Y 只是窗口在桌面上的居中坐标（111~553 随实例变化），
+     *    与真实桌面浏览器的正常取值范围一致，**不构成自动化信号**。
+     *    强行注入 JS 改写 getter 会破坏 toString 原生性（当前 8/8 NATIVE），
+     *    得不偿失，故不做覆盖。
+     *
+     * 保留 positionX/positionY 传 0 的原因：语义上表达意图，且无害。
      */
     fun setDeviceMetrics(
         width: Int,
