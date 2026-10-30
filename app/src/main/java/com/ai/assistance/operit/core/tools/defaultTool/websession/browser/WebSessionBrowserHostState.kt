@@ -43,6 +43,12 @@ internal data class WebSessionPendingDialogState(
 internal data class WebSessionBrowserState(
     val activeSessionId: String? = null,
     val pageTitle: String = "",
+    // 单内核（Cloak）时代新增：向 UI 暴露当前渲染内核与就绪状态，
+    // 让用户在地址栏就能看到"现在跑的是反检测内核"而不是靠猜。
+    val engineLabel: String = "Cloak",
+    val engineReady: Boolean = false,
+    /** 当前活动会话是否跑在 Cloak 内核上。UI 据此决定用 CloakSurfaceView 还是 WebView 渲染。 */
+    val isCloakEngine: Boolean = true,
     val currentUrl: String = "about:blank",
     val canGoBack: Boolean = false,
     val canGoForward: Boolean = false,

@@ -175,6 +175,38 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
         @Volatile var viewportHeightPx: Int? = null
         @Volatile var hasExplicitViewportSize: Boolean = false
         @Volatile var lastSnapshot: BrowserSnapshot? = null
+
+        // ---- 双引擎支持：默认 WebView，可切换到 CloakBrowser ----
+        @Volatile
+        // 单内核化（2026-10-29）：默认引擎改为 CLOAK。
+        // 原默认是 WEBVIEW，导致每个新 tab 都要先 switch_engine 才走反检测内核，
+        // 忘了切就用内置 WebView 的裸指纹去撞风控，等于白做。
+        // 现在 Cloak 是唯一主内核，WebView 只在 Cloak 启动失败时兜底（见 resolveEngine）。
+        var engine: com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine =
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.CLOAK
+
+        /** 该会话的指纹配置（仅 CLOAK 引擎使用）。 */
+        @Volatile
+        var cloakFingerprint: com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakFingerprint? = null
+
+        /** CloakBrowser 的 CDP 客户端（仅 CLOAK 引擎使用）。 */
+        @Volatile
+        var cloakClient: com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakCdpClient? = null
+
+        /**
+         * 是否为「外部反检测内核」（CloakBrowser 或 Camoufox）。
+         *
+         * 语义是「不是系统 WebView」，不是「就是 Cloak」。
+         * 加了 CAMOUFOX 之后若仍写成 == CLOAK，
+         * camoufox 会话会被所有调用点当 WebView 处理，走错分支。
+         */
+        val isCloak: Boolean
+            get() = engine != com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.WEBVIEW
+
+        /** 是否为 Camoufox 内核，用于需要区分两者的分支。 */
+        val isCamoufox: Boolean
+            get() = engine == com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.CAMOUFOX
+
         val stateSignal: Object = Object()
         @Volatile var stateVersion: Long = 0L
         val consoleEntries: MutableList<BrowserConsoleEntry> = mutableListOf()
@@ -223,6 +255,7 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                 "browser_fill_form" -> browserFillForm(tool)
                 "browser_handle_dialog" -> browserHandleDialog(tool)
                 "browser_hover" -> browserHover(tool)
+                "browser_switch_engine" -> browserSwitchEngine(tool)
                 "browser_navigate" -> browserNavigate(tool)
                 "browser_navigate_back" -> browserNavigateBack(tool)
                 "browser_network_requests" -> browserNetworkRequests(tool)
@@ -243,6 +276,228 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
         }
     }
 
+    /**
+     * 切换当前浏览器会话的渲染引擎，并返回切换结果。
+     *
+     * action=status   仅查询当前引擎与 Cloak 运行状态
+     * action=switch   切换引擎（默认 webview），可选传 fingerprint 种子
+     * action=close    关闭 Cloak 进程并回退到 webview
+     */
+    /**
+     * 把会话降级到 WebView。
+     *
+     * 场景：Cloak 是默认引擎，但它的前提是 proot 里有 chromium 二进制（或能自动拉到）。
+     * 老设备、清了数据、网络不通、Xvfb 起不来时，Cloak 必然拉不起来。
+     * 这种情况下如果死守 Cloak，用户会看到「浏览器打不开」——比指纹弱严重得多。
+     *
+     * 因此约定：**Cloak 任何一步失败，就地切回 WebView 继续本次操作**，
+     * 并把原因写进返回体，让上层知道现在是降级态。
+     */
+    /**
+     * 显式降级到 WebView。
+     *
+     * 注意：自 2026-10-30 起，**自动化路径不再自动调用本方法**。
+     * 保留它只给两处用：用户手动 browser_switch_engine engine=webview，
+     * 以及 close/restart 时清状态。
+     * 内核失败一律走 [engineUnavailable]，不再静默降级。
+     */
+    private fun degradeToWebView(session: WebSession, reason: String): String {
+        val prev = session.engine
+        session.engine =
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.WEBVIEW
+        session.cloakClient = null
+        // 降级时一并释放 camoufox 的 BiDi 连接，避免留下悬挂会话
+        runCatching {
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser
+                .camoufox.CamoufoxBrowserTools.detach(session.id)
+        }
+        com.ai.assistance.operit.util.AppLogger.w(
+            "BrowserTools",
+            "会话 ${session.id} 引擎降级 $prev -> WEBVIEW，原因: $reason"
+        )
+        return reason
+    }
+
+    /**
+     * 尝试在 Cloak 上执行一个动作；失败则降级 WebView 并返回 null。
+     * 成功返回结果字符串。
+     */
+    private inline fun tryCloakOrDegrade(
+        session: WebSession,
+        action: String,
+        block: () -> String
+    ): String? {
+        return try {
+            block()
+        } catch (t: Throwable) {
+            val msg = t.message ?: t.javaClass.simpleName
+            degradeToWebView(session, "cloak $action 失败: $msg")
+            null
+        }
+    }
+
+    /** 本进程内已经确认不可用的会话，后续动作直接走 WebView，不再每次重试拉进程。 */
+    private val cloakDeadSessions: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * 判断该会话的「防检测内核」是否真的可用。
+     *
+     * 覆盖两个内核（CloakBrowser / Camoufox），语义是「不是 WebView 且真的能连上」。
+     *
+     * 只看 session.isCloak 当初不够：引擎标记是 CLOAK，但当 proot 里没有二进制、
+     * 自动拉取失败、Xvfb 起不来时，实际请求必然抛异常，用户看到的会是「浏览器打不开」。
+     * 因此这里做一次真实探测：能拿到客户端才算 ready。
+     *
+     * 探测失败**不再静默降级**（主人 2026-10-30 决定）：
+     * 把会话标记为内核不可用，由调用点返回明确错误，避免用 WebView 的裸指纹
+     * 伪装成「正常」去打目标站点——那比直接报错更危险。
+     */
+    private fun cloakReady(session: WebSession): Boolean {
+        if (!session.isCloak) return false
+        if (cloakDeadSessions.contains(session.id)) return false
+
+        val client = runCatching {
+            val bridge =
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
+            bridge.ensureEngine(
+                context = context.applicationContext,
+                sessionId = session.id,
+                engine = session.engine
+            )
+            // 按引擎分别取客户端：两者是不同实现，不能混用
+            if (session.isCamoufox) {
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser
+                    .camoufox.CamoufoxBrowserTools.hasClient(session.id)
+            } else {
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools
+                    .clientOf(session.id) != null
+            }
+        }.getOrElse { false }
+
+        if (!client) {
+            cloakDeadSessions.add(session.id)
+            com.ai.assistance.operit.util.AppLogger.e(
+                "BrowserTools",
+                "会话 ${session.id} 内核(${session.engine.name})不可用，后续动作将返回明确错误而不是降级 WebView"
+            )
+            return false
+        }
+        return true
+    }
+
+    /**
+     * 内核不可用时的统一错误返回。
+     *
+     * 刻意不再调用 degradeToWebView —— 用了 WebView 的裸指纹去访问目标站点，
+     * 等于主动暴露真实环境，比失败更糟。
+     */
+    private fun engineUnavailable(toolName: String, session: WebSession?): ToolResult {
+        val engine = session?.engine?.name?.lowercase() ?: "none"
+        return error(
+            toolName,
+            "anti-detect engine unavailable (engine=$engine). " +
+                "Install the kernel binary or run browser_switch_engine action=status to see details. " +
+                "Refusing to fall back to WebView: its fingerprint would expose the real device."
+        )
+    }
+
+    private fun okCloak(tool: AITool, session: WebSession, code: String, result: String): ToolResult =
+        ok(
+            tool.name,
+            buildBrowserResponse(
+                code = code,
+                openTabs = renderOpenTabs(),
+                pageState = renderPageState(session),
+                result = result
+            )
+        )
+
+    private fun browserSwitchEngine(tool: AITool): ToolResult {
+        // 双内核（2026-10-30 起）。
+        //
+        // 历史：2026-10-29 曾做「单内核化」，只留 Cloak，去掉切换能力。
+        // 现在接入 Camoufox（Firefox 158 源码级反检测）后必须恢复切换：
+        // 两个外部内核各有所长，风控场景不同，需要按目标站点选择。
+        //
+        // 定位（主人 2026-10-30 明确）：
+        //   **官方 WebView 不是主内核，只做最后兜底。**
+        //   主管线永远是「防检测内核」——Cloak（Chromium 146，58 处补丁）
+        //   或 Camoufox（Firefox 158，46 处 C++ 补丁）。
+        //   WebView 仅在两者都启动失败时接管，避免整条 browser_navigate 直接失败。
+        //
+        // 支持的 action：
+        //   status        查状态（默认），同时回报两个内核的可用性
+        //   restart/close 释放当前内核，下次导航重新拉起
+        //   switch        切到 engine 指定的内核（cloak / camoufox / webview）
+        val session = getSession(null)
+        val action = (param(tool, "action")?.trim()?.lowercase()).orEmpty().ifBlank { "status" }
+        val engineParam = (param(tool, "engine")?.trim()?.lowercase()).orEmpty()
+
+        val bridge = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
+        val engineEnum = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine
+
+        return when (action) {
+            "status" -> {
+                val cloakDetail = bridge.statusWithEnv(context.applicationContext)
+                val camoufoxDetail =
+                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser
+                        .camoufox.CamoufoxBrowserTools.statusWithEnv(context.applicationContext)
+                val current = session?.engine?.name?.lowercase() ?: "none"
+                val body = buildString {
+                    append("browser_engine:").append(current).append('\n')
+                    append("primary:anti-detect\n")
+                    append("available:cloak,camoufox,webview\n")
+                    append("webview_role:fallback-only\n")
+                    append("--- cloak ---\n").append(cloakDetail).append('\n')
+                    append("--- camoufox ---\n").append(camoufoxDetail)
+                }
+                if (session != null) {
+                    okCloak(tool, session, "engine:status", body)
+                } else {
+                    ok(tool.name, body)
+                }
+            }
+
+            "restart", "close" -> {
+                val sid = session?.id ?: ""
+                bridge.releaseEngine(sid)
+                if (session != null) {
+                    session.cloakClient = null
+                }
+                val detail = bridge.statusWithEnv(context.applicationContext)
+                ok(
+                    tool.name,
+                    "engine released (cloak + camoufox). Will relaunch on next navigation.\n" + detail
+                )
+            }
+
+            "switch" -> {
+                if (engineParam.isBlank()) {
+                    return error(
+                        tool.name,
+                        "action=switch 需要 engine 参数：cloak / camoufox / webview"
+                    )
+                }
+                val target = engineEnum.fromName(engineParam)
+                if (session == null) {
+                    return error(tool.name, "没有活动会话，先调用 browser_navigate 建一个")
+                }
+                val sid = session.id
+                // 切换前先释放旧内核资源，避免两个引擎同时占端口
+                runCatching { session.cloakClient?.close() }
+                session.cloakClient = null
+                session.engine = target
+                val resultText = bridge.switchEngine(context.applicationContext, sid, target)
+                okCloak(tool, session, "engine:${target.name.lowercase()}", resultText)
+            }
+
+            else -> error(
+                tool.name,
+                "unsupported action '$action'; use status / restart / switch"
+            )
+        }
+    }
+
     private fun browserNavigate(tool: AITool): ToolResult {
         val targetUrl = param(tool, "url")?.trim()
         if (targetUrl.isNullOrBlank()) {
@@ -254,6 +509,34 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
             runOnMainSync {
                 getSession(null) ?: createSessionTabOnMain(context.applicationContext, "about:blank")
             }
+        if (cloakReady(session)) {
+            // Cloak 是默认引擎，但依赖 proot 里的 chromium 二进制。
+            // 拉不起来时（老设备/清过数据/网络不通/Xvfb 缺席）必须降级回 WebView 继续导航，
+            // 否则用户看到的是「浏览器打不开」——比指纹弱严重得多。
+            val cloakOutcome = tryCloakOrDegrade(session, "navigate") {
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge.navigate(
+                    context = context.applicationContext,
+                    sessionId = session.id,
+                    engine = session.engine,
+                    url = targetUrl
+                )
+            }
+            if (cloakOutcome != null) {
+                session.currentUrl = targetUrl
+                session.pageLoaded = true
+                notifySessionStateChanged(session)
+                return ok(
+                    tool.name,
+                    buildBrowserResponse(
+                        code = "cloak:goto(" + quoteJsCode(targetUrl) + ")",
+                        openTabs = renderOpenTabs(),
+                        pageState = renderPageState(session),
+                        result = cloakOutcome
+                    )
+                )
+            }
+            // 走到这里说明已降级到 WEBVIEW，下面的 WebView 路径继续执行。
+        }
         val markers = captureActionMarkers(session)
 
         runOnMainSync<Unit> {
@@ -285,6 +568,16 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserClick(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val sel = param(tool, "selector")?.trim() ?: param(tool, "ref")?.trim()
+                ?: return error(tool.name, "cloak 引擎需要 selector 参数")
+            val out = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge.clickSelector(
+                sessionId = session.id,
+                engine = session.engine,
+                selector = sel
+            )
+            return okCloak(tool, session, "cloak:click", out)
+        }
         val ref = param(tool, "ref")?.trim()?.takeIf { it.isNotBlank() }
         val selector = param(tool, "selector")?.trim()?.takeIf { it.isNotBlank() }
         if (ref == null && selector == null) {
@@ -951,6 +1244,33 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserWaitFor(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val tRaw = param(tool, "time")?.trim()?.toDoubleOrNull()
+            val txt = param(tool, "text")?.takeIf { it.isNotBlank() }
+            val txtGone = param(tool, "textGone")?.takeIf { it.isNotBlank() }
+            if (tRaw == null && txt == null && txtGone == null) return error(tool.name, "One of time, text, or textGone is required")
+            val deadline = System.currentTimeMillis() + DEFAULT_TIMEOUT_MS.coerceAtLeast(10_000L)
+            if (tRaw != null && tRaw > 0) Thread.sleep((tRaw * 1000.0).toLong().coerceIn(0L, 30_000L))
+            if (txt != null) {
+                var found = false
+                while (System.currentTimeMillis() < deadline) {
+                    val body = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.text(session.id, 20000) }.getOrElse { "" }
+                    if (body.contains(txt)) { found = true; break }
+                    Thread.sleep(300)
+                }
+                if (!found) return error(tool.name, "Timeout waiting for the requested condition")
+            }
+            if (txtGone != null) {
+                var gone = false
+                while (System.currentTimeMillis() < deadline) {
+                    val body2 = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.text(session.id, 20000) }.getOrElse { "" }
+                    if (!body2.contains(txtGone)) { gone = true; break }
+                    Thread.sleep(300)
+                }
+                if (!gone) return error(tool.name, "Timeout waiting for the requested condition")
+            }
+            return ok(tool.name, buildBrowserResponse(code = "cloak:waitFor()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = "waited"))
+        }
         val timeRaw = param(tool, "time")?.trim()?.takeIf { it.isNotBlank() }
         val parsedTimeSeconds = timeRaw?.toDoubleOrNull()
         if (timeRaw != null && parsedTimeSeconds == null) {
@@ -1011,6 +1331,10 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
     private fun browserSnapshot(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
         val selector = param(tool, "selector")?.trim()?.takeIf { it.isNotBlank() }
+        if (cloakReady(session)) {
+            val html = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.html(session.id, 12000) }.getOrElse { "" }
+            return ok(tool.name, buildBrowserResponse(code = "cloak:snapshot()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = html))
+        }
         val depthRaw = param(tool, "depth")?.trim()?.takeIf { it.isNotBlank() }
         val depth =
             when {
@@ -1051,6 +1375,11 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserNavigateBack(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val out = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.eval(session.id, "history.back(); 'ok'") }.getOrElse { it.message ?: "back failed" }
+            notifySessionStateChanged(session)
+            return ok(tool.name, buildBrowserResponse(code = "cloak:goBack()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = out))
+        }
         val couldGoBack = session.canGoBack || runCatching { session.webView.canGoBack() }.getOrDefault(false)
         val markers = captureActionMarkers(session)
 
@@ -1092,6 +1421,13 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserHover(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val ref = param(tool, "ref")?.trim()?.takeIf { it.isNotBlank() }
+                ?: return error(tool.name, "ref is required")
+            val js = "(function(){var e=document.querySelector(" + quoteJsCode(ref) + ");if(!e)return 'not_found';e.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));return 'hovered';})()"
+            val out = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.eval(session.id, js) }.getOrElse { it.message ?: "hover failed" }
+            return ok(tool.name, buildBrowserResponse(code = "cloak:hover()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = out))
+        }
         val ref = param(tool, "ref")?.trim()?.takeIf { it.isNotBlank() }
             ?: return error(tool.name, "ref is required")
 
@@ -1136,6 +1472,67 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
             ?: return error(tool.name, "startRef is required")
         val endRef = param(tool, "endRef")?.trim()?.takeIf { it.isNotBlank() }
             ?: return error(tool.name, "endRef is required")
+
+        if (cloakReady(session)) {
+            // Cloak 引擎：用 CDP Input.dispatchDragEvent 之外的通用鼠标序列实现拖拽
+            val coordsJs =
+                """
+                (function(){
+                  function center(ref){
+                    var el = document.querySelector('[data-operit-ref="'+ref+'"]');
+                    if(!el) return null;
+                    var r = el.getBoundingClientRect();
+                    return {x: r.left + r.width/2, y: r.top + r.height/2};
+                  }
+                  var a = center(${org.json.JSONObject.quote(startRef)});
+                  var b = center(${org.json.JSONObject.quote(endRef)});
+                  if(!a || !b) return null;
+                  return {sx: a.x, sy: a.y, ex: b.x, ey: b.y};
+                })()
+                """.trimIndent()
+            val raw = runCatching {
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools
+                    .eval(session.id, coordsJs)
+            }.getOrElse { null }
+            val obj = runCatching { org.json.JSONObject(raw ?: "") }.getOrNull()
+                ?: return error(
+                    tool.name,
+                    "drag 失败：未在页面中定位到 ref=$startRef → $endRef 的中心坐标"
+                )
+            val sx = obj.optDouble("sx", Double.NaN)
+            val sy = obj.optDouble("sy", Double.NaN)
+            val ex = obj.optDouble("ex", Double.NaN)
+            val ey = obj.optDouble("ey", Double.NaN)
+            if (sx.isNaN() || sy.isNaN() || ex.isNaN() || ey.isNaN()) {
+                return error(tool.name, "drag 失败：坐标解析异常")
+            }
+            val client = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                .CloakBrowserTools.clientOf(session.id)
+                ?: return error(tool.name, "drag 失败：会话 ${session.id} 无 CDP 连接")
+            val okDrag = runCatching {
+                // 鼠标按下 → 分步移动（触发 dragstart/dragover）→ 松开
+                client.mouseEvent("mousePressed", sx, sy, button = "left", clickCount = 1)
+                val steps = 12
+                for (i in 1..steps) {
+                    val t = i.toDouble() / steps
+                    client.mouseEvent(
+                        "mouseMoved",
+                        sx + (ex - sx) * t,
+                        sy + (ey - sy) * t,
+                        button = "left",
+                        buttons = 1
+                    )
+                    Thread.sleep(16)
+                }
+                client.mouseEvent("mouseReleased", ex, ey, button = "left", clickCount = 1)
+                true
+            }.getOrElse { false }
+            return if (okDrag) {
+                ok(tool.name, "Dragged ref=$startRef -> ref=$endRef (cloak)")
+            } else {
+                error(tool.name, "drag 失败：CDP 鼠标事件派发异常")
+            }
+        }
 
         runOnMainSync<Unit> {
             ensureSessionAttachedOnMain(session.id)
@@ -1189,6 +1586,16 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserEvaluate(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val fn = param(tool, "function")?.trim()
+            if (fn.isNullOrBlank()) return error(tool.name, "function is required")
+            val out = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge.evaluate(
+                sessionId = session.id,
+                engine = session.engine,
+                script = "(function(){return (" + fn + ")();})()"
+            )
+            return okCloak(tool, session, fn, out)
+        }
         val functionSource = param(tool, "function")?.trim()
         if (functionSource.isNullOrBlank()) {
             return error(tool.name, "function is required")
@@ -1364,6 +1771,13 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserPressKey(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val key = param(tool, "key")?.trim().orEmpty()
+            if (key.isBlank()) return error(tool.name, "key is required")
+            val out = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.pressEnter(session.id) }.getOrElse { it.message ?: "press failed" }
+            notifySessionStateChanged(session)
+            return ok(tool.name, buildBrowserResponse(code = "cloak:pressKey()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = out))
+        }
         val key = param(tool, "key")?.trim()
         if (key.isNullOrBlank()) {
             return error(tool.name, "key is required")
@@ -1431,6 +1845,13 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
             runOnMainSync {
                 getSession(null) ?: createSessionTabOnMain(context.applicationContext, "about:blank")
             }
+        if (cloakReady(session)) {
+            session.cloakClient?.setDeviceMetrics(width.toInt(), height.toInt(), density.toDouble(), false)
+            session.viewportWidthPx = width
+            session.viewportHeightPx = height
+            notifySessionStateChanged(session)
+            return ok(tool.name, buildBrowserResponse(code = "cloak:resize()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = "Resized cloak viewport to " + width.toInt() + "x" + height.toInt()))
+        }
         runOnMainSync<Unit> {
             ensureSessionAttachedOnMain(session.id)
             session.viewportWidthPx = width
@@ -1456,6 +1877,12 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserRunCode(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val code = param(tool, "code")?.trim()
+            if (code.isNullOrBlank()) return error(tool.name, "code is required")
+            val out = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.eval(session.id, code) }.getOrElse { it.message ?: "runCode failed" }
+            return ok(tool.name, buildBrowserResponse(code = code, openTabs = renderOpenTabs(), pageState = renderPageState(session), result = out))
+        }
         val code = param(tool, "code")?.trim()
         if (code.isNullOrBlank()) {
             return error(tool.name, "code is required")
@@ -1484,6 +1911,17 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserSelectOption(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val ref = param(tool, "ref")?.trim()?.takeIf { it.isNotBlank() }
+                ?: return error(tool.name, "ref is required")
+            val values = parseStringArrayParam(param(tool, "values"))
+                ?: return error(tool.name, "values must be a JSON array")
+            if (values.isEmpty()) return error(tool.name, "values must not be empty")
+            val v = values.first()
+            val js = "(function(){var e=document.querySelector(" + quoteJsCode(ref) + ");if(!e)return 'not_found';e.value=" + quoteJsCode(v) + ";e.dispatchEvent(new Event('input',{bubbles:true}));e.dispatchEvent(new Event('change',{bubbles:true}));return 'selected:'+e.value;})()"
+            val out = runCatching { com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.eval(session.id, js) }.getOrElse { it.message ?: "select failed" }
+            return ok(tool.name, buildBrowserResponse(code = "cloak:selectOption()", openTabs = renderOpenTabs(), pageState = renderPageState(session), result = out))
+        }
         val ref = param(tool, "ref")?.trim()?.takeIf { it.isNotBlank() }
             ?: return error(tool.name, "ref is required")
         val values = parseStringArrayParam(param(tool, "values"))
@@ -1608,6 +2046,14 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserTakeScreenshot(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val path = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge.screenshot(
+                context = context.applicationContext,
+                sessionId = session.id,
+                engine = session.engine
+            )
+            return okCloak(tool, session, "cloak:screenshot", path)
+        }
         val type = param(tool, "type")?.trim()?.lowercase(Locale.ROOT).orEmpty().ifBlank { "png" }
         if (type !in setOf("png", "jpeg", "jpg")) {
             return error(tool.name, "type must be png or jpeg")
@@ -1635,6 +2081,18 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
 
     private fun browserType(tool: AITool): ToolResult {
         val session = getSession(null) ?: return error(tool.name, "No active browser tab")
+        if (cloakReady(session)) {
+            val sel = param(tool, "selector")?.trim() ?: param(tool, "ref")?.trim()
+                ?: return error(tool.name, "cloak 引擎需要 selector 参数")
+            val txt = param(tool, "text") ?: return error(tool.name, "text is required")
+            val out = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge.typeInto(
+                sessionId = session.id,
+                engine = session.engine,
+                selector = sel,
+                text = txt
+            )
+            return okCloak(tool, session, "cloak:type", out)
+        }
         val ref = param(tool, "ref")?.trim()?.takeIf { it.isNotBlank() }
             ?: return error(tool.name, "ref is required")
         val text = param(tool, "text") ?: return error(tool.name, "text is required")

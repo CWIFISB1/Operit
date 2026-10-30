@@ -25,6 +25,18 @@
             ]
         },
         {
+            "name": "switch_engine",
+            "description": {
+                "zh": "查询或切换当前浏览器标签页的渲染引擎。webview 为内置 Android WebView；cloak 为 proot 内反检测 Chromium（可绕过指纹检测）。",
+                "en": "Inspect or switch the rendering engine of the active tab. webview uses the built-in Android WebView; cloak uses the anti-detection Chromium inside proot."
+            },
+            "parameters": [
+                { "name": "action", "description": { "zh": "status 查询 / switch 切换 / close 释放，默认 switch。", "en": "status to query, switch to change, close to release. Defaults to switch." }, "type": "string", "required": false },
+                { "name": "engine", "description": { "zh": "webview 或 cloak，默认 webview。", "en": "webview or cloak. Defaults to webview." }, "type": "string", "required": false },
+                { "name": "fingerprint", "description": { "zh": "可选指纹种子，数字或任意字符串（自动哈希）。", "en": "Optional fingerprint seed; numeric or any string (hashed automatically)." }, "type": "string", "required": false }
+            ]
+        },
+        {
             "name": "close",
             "description": { "zh": "关闭当前 tab。", "en": "Close the current tab." },
             "parameters": []
@@ -196,6 +208,7 @@ const TOOL_NAMES = [
     "run_code",
     "select_option",
     "snapshot",
+    "switch_engine",
     "type",
     "wait_for",
     "tabs"
@@ -326,6 +339,10 @@ async function snapshot(params = {}) {
     const result = await Tools.Net.browserSnapshot(params);
     return maybePersistLargeBrowserResponse(result, "snapshot");
 }
+async function switch_engine(params = {}) {
+    const result = await Tools.Net.browserSwitchEngine(params);
+    return maybePersistLargeBrowserResponse(result, "switch_engine");
+}
 async function type(params) {
     const result = await Tools.Net.browserType(params);
     return maybePersistLargeBrowserResponse(result, "type");
@@ -359,7 +376,9 @@ exports.resize = resize;
 exports.run_code = run_code;
 exports.select_option = select_option;
 exports.snapshot = snapshot;
+exports.switch_engine = switch_engine;
 exports.type = type;
 exports.wait_for = wait_for;
 exports.tabs = tabs;
 exports.main = browserMain;
+// asset-refresh: force repack after switch_engine landed

@@ -104,6 +104,8 @@ internal fun StandardBrowserSessionTools.configureWebView(
     }
     applySessionUserAgent(session, userAgent)
     configureCookiePolicy(session.webView)
+    // 内嵌反检测：DOCUMENT_START_SCRIPT 在页面脚本执行前注入指纹补丁，不依赖外部浏览器
+    BrowserStealthSupport.attach(session.webView, session.id)
 
     session.webView.apply {
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
@@ -843,6 +845,16 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
     return WebSessionBrowserState(
         activeSessionId = activeId,
         pageTitle = activeSession?.pageTitle.orEmpty(),
+        // 单内核：引擎恒为 Cloak；engineReady 反映 CDP 客户端是否已建立，
+        // 用于 UI 区分"已连上进程"与"进程还没起来"。
+        // UI 决定用 CloakSurfaceView 还是 WebView 渲染，必须跟真实引擎状态一致：
+        //  - isCloakEngine：会话标记为 CLOAK，且 CDP 客户端确实已建立
+        //  - engineReady：CDP 已连上（实心点）／未连上（空心点，下次导航时拉起）
+        // 降级到 WebView 后 isCloak 会变成 false，这里自动跟着切成 WebView 渲染，
+        // 不会出现「UI 还在等 Cloak 画面、实际 WebView 已经在跑」的黑屏。
+        engineLabel = if (activeSession?.isCloak == true) "Cloak" else "WebView",
+        engineReady = activeSession?.cloakClient != null,
+        isCloakEngine = activeSession?.isCloak == true && activeSession?.cloakClient != null,
         currentUrl = activeSession?.currentUrl?.ifBlank { "about:blank" } ?: "about:blank",
         canGoBack = activeSession?.canGoBack == true,
         canGoForward = activeSession?.canGoForward == true,

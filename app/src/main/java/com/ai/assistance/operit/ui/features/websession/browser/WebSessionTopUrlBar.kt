@@ -53,6 +53,8 @@ internal fun WebSessionTopUrlBar(
     isEditing: Boolean,
     urlDraft: String,
     isBookmarked: Boolean,
+    engineLabel: String = "Cloak",
+    engineReady: Boolean = false,
     onStartEditing: () -> Unit,
     onUrlDraftChange: (String) -> Unit,
     onSubmitUrl: () -> Unit,
@@ -183,6 +185,51 @@ internal fun WebSessionTopUrlBar(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            // 单内核标识：一眼可见当前跑的是反检测内核，而不是内置 WebView。
+                            // 实心点=CDP 已连上；空心点=进程尚未就绪（下次导航时拉起）。
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color =
+                                    if (engineReady) {
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                    }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier =
+                                            Modifier
+                                                .size(6.dp)
+                                                .background(
+                                                    color =
+                                                        if (engineReady) {
+                                                            MaterialTheme.colorScheme.primary
+                                                        } else {
+                                                            MaterialTheme.colorScheme.outline
+                                                        },
+                                                    shape = CircleShape
+                                                )
+                                    )
+                                    Text(
+                                        text = if (engineReady) engineLabel else engineLabel + "…",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color =
+                                            if (engineReady) {
+                                                MaterialTheme.colorScheme.primary
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
                             Icon(
                                 imageVector =
                                     if (url.startsWith("https://")) {

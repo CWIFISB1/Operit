@@ -206,6 +206,33 @@ fun getJsToolsDefinition(): String {
                     }
                     return toolCall("browser_navigate_back", options || {});
                 },
+                browserSwitchEngine: (options) => {
+                    if (options !== undefined && (typeof options !== 'object' || Array.isArray(options))) {
+                        throw new Error("browserSwitchEngine only accepts one options object");
+                    }
+                    const params = { ...(options || {}) };
+                    if (params.action !== undefined && params.action !== null) {
+                        const action = String(params.action).trim().toLowerCase();
+                        if (action !== 'status' && action !== 'switch' && action !== 'close') {
+                            throw new Error("action must be one of: status, switch, close");
+                        }
+                        params.action = action;
+                    }
+                    if (params.engine !== undefined && params.engine !== null) {
+                        const engine = String(params.engine).trim().toLowerCase();
+                        if (engine !== 'webview' && engine !== 'cloak') {
+                            throw new Error("engine must be one of: webview, cloak");
+                        }
+                        params.engine = engine;
+                    }
+                    if (params.fingerprint !== undefined && params.fingerprint !== null) {
+                        params.fingerprint = String(params.fingerprint).trim();
+                        if (!params.fingerprint) {
+                            delete params.fingerprint;
+                        }
+                    }
+                    return toolCall("browser_switch_engine", params);
+                },
                 browserClick: (options) => {
                     if (!options || typeof options !== 'object' || Array.isArray(options)) {
                         throw new Error("browserClick only accepts one options object");

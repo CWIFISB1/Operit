@@ -1295,6 +1295,15 @@ fun registerAllTools(handler: AIToolHandler, context: Context) {
     )
 
     handler.registerTool(
+            name = "browser_switch_engine",
+            descriptionGenerator = { tool ->
+                val engine = tool.parameters.find { it.name == "engine" }?.value ?: "webview"
+                val action = tool.parameters.find { it.name == "action" }?.value ?: "status"
+                "Browser engine ${action} -> ${engine}"
+            },
+            executor = { tool -> ToolGetter.getBrowserSessionTools(context).invoke(tool) }
+    )
+    handler.registerTool(
             name = "browser_navigate",
             descriptionGenerator = { tool ->
                 val url = tool.parameters.find { it.name == "url" }?.value ?: ""

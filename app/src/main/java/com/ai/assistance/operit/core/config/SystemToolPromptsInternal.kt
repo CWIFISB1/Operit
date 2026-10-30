@@ -391,6 +391,16 @@ object SystemToolPromptsInternal {
                                 )
                         ),
                         ToolPrompt(
+                            name = "browser_switch_engine",
+                            description = "Inspect or switch the rendering engine of the active browser tab. webview is the built-in Android WebView; cloak is the anti-detection Chromium running inside proot. Use action=status to query, action=switch to change, action=close to release.",
+                            parametersStructured =
+                                listOf(
+                                    ToolParameterSchema(name = "action", type = "string", description = "status | switch | close, default switch", required = false, default = "switch"),
+                                    ToolParameterSchema(name = "engine", type = "string", description = "webview | cloak, default webview", required = false, default = "webview"),
+                                    ToolParameterSchema(name = "fingerprint", type = "string", description = "optional fingerprint seed; numeric or any string (hashed)", required = false)
+                                )
+                        ),
+                        ToolPrompt(
                             name = "browser_navigate",
                             description = "Navigate the active browser tab to a URL. If no tab exists yet, the first tab is created automatically.",
                             parametersStructured =
@@ -3380,6 +3390,16 @@ object SystemToolPromptsInternal {
                                 listOf(
                                     ToolParameterSchema(name = "element", type = "string", description = "可选，人类可读元素描述", required = false),
                                     ToolParameterSchema(name = "ref", type = "string", description = "目标元素 ref", required = true)
+                                )
+                        ),
+                        ToolPrompt(
+                            name = "browser_switch_engine",
+                            description = "查询或切换当前浏览器标签页的渲染引擎。webview 为内置 Android WebView；cloak 为 proot 内反检测 Chromium。action=status 查询，action=switch 切换，action=close 释放。",
+                            parametersStructured =
+                                listOf(
+                                    ToolParameterSchema(name = "action", type = "string", description = "status | switch | close，默认 switch", required = false, default = "switch"),
+                                    ToolParameterSchema(name = "engine", type = "string", description = "webview | cloak，默认 webview", required = false, default = "webview"),
+                                    ToolParameterSchema(name = "fingerprint", type = "string", description = "可选指纹种子，数字或任意字符串（自动哈希）", required = false)
                                 )
                         ),
                         ToolPrompt(

@@ -48,6 +48,7 @@ import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.WebSes
 import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.WebSessionPendingDialogState
 import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.WebSessionWebViewHost
 import com.ai.assistance.operit.core.tools.defaultTool.websession.userscript.ui.WebSessionUserscriptUiState
+import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakSurfaceView
 import java.util.Locale
 
 @Composable
@@ -159,6 +160,8 @@ internal fun WebSessionBrowserScreen(
                 isEditing = hostState.isEditingUrl,
                 urlDraft = hostState.urlDraft,
                 isBookmarked = isBookmarked,
+                engineLabel = browserState.engineLabel,
+                engineReady = browserState.engineReady,
                 onStartEditing = {
                     onHostStateChange { current ->
                         current.copy(
@@ -287,18 +290,46 @@ internal fun WebSessionBrowserScreen(
                                 .background(MaterialTheme.colorScheme.background),
                         contentAlignment = Alignment.Center
                     ) {
-                        AndroidView(
-                            factory = { context ->
-                                FrameLayout(context).apply {
-                                    setBackgroundColor(AndroidColor.WHITE)
-                                    webViewHost.attachContainer(this)
-                                }
-                            },
-                            update = { container ->
-                                webViewHost.attachContainer(container)
-                            },
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        // 单内核：画面来源取决于当前会话跑的引擎。
+                        //  - CLOAK   → CloakSurfaceView（CDP 截图流 + 触摸回传，真反检测内核）
+                        //  - 其它   → 原 AndroidView + WebView（Cloak 起不来时的兜底渲染）
+                        if (browserState.isCloakEngine) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    CloakSurfaceView(ctx).apply {
+                                        sessionId = browserState.activeSessionId.orEmpty()
+                                        clientProvider = {
+                                            val sid = browserState.activeSessionId
+                                            if (sid == null) null
+                                            else com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.clientOf(sid)
+                                        }
+                                        setBackgroundColor(AndroidColor.WHITE)
+                                    }
+                                },
+                                update = { view ->
+                                    view.sessionId = browserState.activeSessionId.orEmpty()
+                                    view.clientProvider = {
+                                        val sid = browserState.activeSessionId
+                                        if (sid == null) null
+                                        else com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.clientOf(sid)
+                                    }
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            AndroidView(
+                                factory = { context ->
+                                    FrameLayout(context).apply {
+                                        setBackgroundColor(AndroidColor.WHITE)
+                                        webViewHost.attachContainer(this)
+                                    }
+                                },
+                                update = { container ->
+                                    webViewHost.attachContainer(container)
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
                     }
                 }
             }
