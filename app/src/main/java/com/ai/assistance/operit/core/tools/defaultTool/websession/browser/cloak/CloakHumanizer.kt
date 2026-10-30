@@ -196,7 +196,7 @@ internal object CloakHumanizer {
             else -> 24L
         }
         // 首尾各慢 1.6 倍，中段恢复基准（模拟加速-巡航-减速）
-        val n = presetOf(preset).scrollSteps.coerceAtLeast(2)
+        val n = presetOf(preset).scrollMaxSteps.coerceAtLeast(2)
         val t = step.toDouble() / n
         val shape = if (t < 0.2 || t > 0.8) 1.6 else 1.0
         val jitter = rnd.nextLong(-3L, 6L)
