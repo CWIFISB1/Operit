@@ -559,9 +559,10 @@ private:
     }
 
     static void* JsRealloc(JSMallocState* state, void* pointer, size_t size) {
-        // [MTE-FIX] old_size 仍需查（free/realloc 前不知旧大小），
-        // MallocUsableSize 已内含 untag，安全。
-        const size_t old_size = pointer == nullptr ? 0U : MallocUsableSize(pointer);
+        // [MTE-FIX-2] old_size 恒 0（MallocUsableSize 不再碰 libc）。
+        // 只影响统计口径，不影响 realloc 正确性。
+        const size_t old_size = 0U;
+        (void)pointer;
         if (size == 0U) {
             if (pointer != nullptr) {
                 auto* vm = static_cast<QuickJsVm*>(state->opaque);
@@ -585,9 +586,11 @@ private:
     //   ① JsMalloc / JsFree / JsRealloc 内部记账
     //   ② kMallocFunctions 第 4 项，QuickJS 引擎自己会调
     // 全部都必须先 untag，否则 Android 16 上 malloc_usable_size 直接 abort。
-    static size_t MallocUsableSize(const void* pointer) {
-        if (pointer == nullptr) return 0U;
-        return malloc_usable_size(const_cast<void*>(OPERIT_UNTAG(pointer)));
+    // [MTE-FIX-2] 不再注册进 kMallocFunctions，只作内部占位。
+    // 定不可调 libc：QuickJS 可能把一个 container_of 推算的 header 地址
+    // 传进来，Android 16 + MTE 下 bionic 必然 abort。返回 0 是唯一安全解。
+    static size_t MallocUsableSize(const void* /*pointer*/) {
+        return 0U;
     }
 
     void RecordAllocation(size_t size) {
@@ -862,11 +865,31 @@ private:
     size_t active_host_call_depth_ = 0;
 };
 
+// [MTE-FIX-2] 第 4 项 js_malloc_usable_size 刻意传 nullptr，这是根修。
+//
+// 崩溃链（tombstone_03, Android 16）：
+//   JS_NewContext -> JS_NewContextRaw -> JS_NewCConstructor
+//     -> js_realloc_rt(quickjs.c:1834) -> __js_realloc
+//       -> __js_malloc_usable_size(quickjs.c:1723)
+//         -> lb = container_of(ptr, JSMallocLargeBlockHeader, header.user_data)
+//         -> s->mf.js_malloc_usable_size(lb)     ← 传的是「推算出来的 header 地址」
+//           -> libc malloc_usable_size(lb) -> bionic 校验 tag 失败 -> abort()
+//
+// 关键：进 libc 的不是 malloc 原始返回值，而是 QuickJS 用 container_of
+// 算出来的 block header 地址。Android 16 开 MTE 后 bionic 要求该地址的
+// tag 与分配记录一致，header 地址必然不一致 -> abort。
+// 上一版只做 untag（tag 清 0），但 MTE 下清 0 同样不匹配，所以照崩。
+//
+// QuickJS 源码对此留了后路（quickjs.c:1736）：
+//     if (s->mf.js_malloc_usable_size) { ...查 libc... }
+//     else { return 0; }
+// 传 nullptr 就让它走 else 分支，完全不触达 libc。
+// 代价：usable_size 恒 0，仅内存统计精度下降，不影响分配正确性，不泄漏。
 const JSMallocFunctions QuickJsVm::kMallocFunctions = {
     &QuickJsVm::JsMalloc,
     &QuickJsVm::JsFree,
     &QuickJsVm::JsRealloc,
-    &QuickJsVm::MallocUsableSize,
+    nullptr,
 };
 
 QuickJsVm* FromHandle(jlong handle) {
