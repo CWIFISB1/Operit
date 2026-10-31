@@ -173,7 +173,7 @@ internal object CamoufoxLauncher {
      * 执行一条命令（同步取输出）。
      *
      * 2026-10-30 修复（关键）：原实现用 `ProcessBuilder("sh", "-c", cmd)`，
-     * 在 Android 应用进程里这走的是 **/system/bin/sh**，根目录是 Android 根，
+     * 在 Android 应用进程里这走的是 Android 系统自带的 /system/bin/sh，根目录是 Android 根，
      * 既看不到 proot 的 /root/.camoufox，也不会应用 CAMOU_CONFIG 环境变量。
      * 后果链：resolveBinary 找不到二进制 → lastError="找不到 camoufox 二进制"
      * → launch 返回 0 → cloakReady()=false → 全部 browser_* 工具走 WebView。
