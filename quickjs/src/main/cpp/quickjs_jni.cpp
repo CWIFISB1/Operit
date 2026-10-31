@@ -1,6 +1,7 @@
 #include <jni.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <malloc.h>
@@ -11,6 +12,40 @@
 #include <vector>
 
 #include "operit_quickjs.h"
+
+// ============================================================================
+// [MTE-FIX] Android 16 Tagged Pointers / MTE 兼容
+//
+// 崩溃现场（真机 Xiaomi Android 16，tombstone_01/02 两次一致）：
+//   signal 6 (SIGABRT)
+//   Abort message: 'Pointer tag for 0x784b073170 was truncated'
+//   #00 libc.so (abort+160)
+//   #01 libc.so (malloc_usable_size+112)
+//   #02 libquickjsjni.so  ← MallocUsableSize()
+//   #03 libquickjsjni.so  ← RecordReallocation()
+//   线程名 OperitQuickJsRuntime
+//
+// 机理：Android 16 默认开启 tagged_addr_ctrl = PR_TAGGED_ADDR_ENABLE，
+// malloc 返回的指针高 8 位携带 MTE tag。QuickJS 内部会把指针编码进
+// NaN-boxing 的 JSValue（64 位 double 载荷），再取出来时 tag 被破坏。
+// bionic 的 malloc_usable_size() 在校验 tag 不符时直接 abort()。
+//
+// 修法：调用 malloc 系查询 API 前先把 tag 清掉，只保留真实地址。
+// ============================================================================
+//
+// 用位运算清 tag，不依赖 __builtin_untag（该内建并非所有 clang 版本都有，
+// 直接用会导致编译失败）。top-byte-ignore 的 tag 位于 bit 56..63，
+// 掩码 0x00FFFFFFFFFFFFFF 即可。
+//
+// 仅 aarch64 生效：其它架构指针无 tag，直通避免多余指令。
+// uintptr_t 在 32 位架构是 32 位，掩码会被截断，但因为本就只在
+// aarch64(64 位) 分支里用，不存在该问题。
+#if defined(__aarch64__)
+#define OPERIT_UNTAG(ptr) \
+    ((void*)((uintptr_t)(ptr) & (uintptr_t)0x00FFFFFFFFFFFFFFULL))
+#else
+#define OPERIT_UNTAG(ptr) (ptr)
+#endif
 
 namespace {
 
@@ -507,7 +542,10 @@ private:
         void* pointer = std::malloc(size);
         if (pointer != nullptr) {
             auto* vm = static_cast<QuickJsVm*>(state->opaque);
-            vm->RecordAllocation(MallocUsableSize(pointer));
+            // [MTE-FIX] 手里已经有 size，不必再走 malloc_usable_size。
+            // 少一次 libc 调用，同时彻底避开 tagged pointer 校验。
+            // 记账口径仍是「实际占用」的保守下界（可用大小 >= 请求大小）。
+            vm->RecordAllocation(size);
         }
         return pointer;
     }
@@ -517,31 +555,39 @@ private:
             auto* vm = static_cast<QuickJsVm*>(state->opaque);
             vm->RecordFree(MallocUsableSize(pointer));
         }
-        std::free(pointer);
+        std::free(OPERIT_UNTAG(pointer));
     }
 
     static void* JsRealloc(JSMallocState* state, void* pointer, size_t size) {
+        // [MTE-FIX] old_size 仍需查（free/realloc 前不知旧大小），
+        // MallocUsableSize 已内含 untag，安全。
         const size_t old_size = pointer == nullptr ? 0U : MallocUsableSize(pointer);
         if (size == 0U) {
             if (pointer != nullptr) {
                 auto* vm = static_cast<QuickJsVm*>(state->opaque);
                 vm->RecordFree(old_size);
             }
-            std::free(pointer);
+            std::free(OPERIT_UNTAG(pointer));
             return nullptr;
         }
-
-        void* new_pointer = std::realloc(pointer, size);
+        // 统一 untag：厂商定制 libc 在 MTE 严格模式下对 tag 挑剔。
+        void* new_pointer = std::realloc(OPERIT_UNTAG(pointer), size);
         if (new_pointer != nullptr) {
             auto* vm = static_cast<QuickJsVm*>(state->opaque);
-            const size_t new_size = MallocUsableSize(new_pointer);
-            vm->RecordReallocation(old_size, new_size);
+            // new_size 直接用请求 size，绕开 usable_size
+            vm->RecordReallocation(old_size, size);
         }
         return new_pointer;
     }
 
+    // [MTE-FIX] 见文件顶部说明。
+    // 这个函数同时被三处调用：
+    //   ① JsMalloc / JsFree / JsRealloc 内部记账
+    //   ② kMallocFunctions 第 4 项，QuickJS 引擎自己会调
+    // 全部都必须先 untag，否则 Android 16 上 malloc_usable_size 直接 abort。
     static size_t MallocUsableSize(const void* pointer) {
-        return pointer == nullptr ? 0U : malloc_usable_size(pointer);
+        if (pointer == nullptr) return 0U;
+        return malloc_usable_size(const_cast<void*>(OPERIT_UNTAG(pointer)));
     }
 
     void RecordAllocation(size_t size) {
