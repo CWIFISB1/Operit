@@ -33,19 +33,21 @@
 // 修法：调用 malloc 系查询 API 前先把 tag 清掉，只保留真实地址。
 // ============================================================================
 //
-// 用位运算清 tag，不依赖 __builtin_untag（该内建并非所有 clang 版本都有，
-// 直接用会导致编译失败）。top-byte-ignore 的 tag 位于 bit 56..63，
-// 掩码 0x00FFFFFFFFFFFFFF 即可。
+// [MTE-FIX-3] 曾经在这里定义 OPERIT_UNTAG 宏，把指针 tag 位清零。
+// 该做法是错的，已彻底移除，切勿再引入。
 //
-// 仅 aarch64 生效：其它架构指针无 tag，直通避免多余指令。
-// uintptr_t 在 32 位架构是 32 位，掩码会被截断，但因为本就只在
-// aarch64(64 位) 分支里用，不存在该问题。
-#if defined(__aarch64__)
-#define OPERIT_UNTAG(ptr) \
-    ((void*)((uintptr_t)(ptr) & (uintptr_t)0x00FFFFFFFFFFFFFFULL))
-#else
-#define OPERIT_UNTAG(ptr) (ptr)
-#endif
+// 依据（tombstone_06，Android 16）：
+//   Abort message: 'Pointer tag for 0x784b0882c0 was truncated'
+//   #01 libc.so (free+112)
+//   #02 libquickjsjni.so (js_realloc_rt+748)
+// 崩溃地址高 8 位为 0x00，即 tag 被我们的宏清掉了。
+// MTE 要求 free/realloc 收到的指针 tag 与 malloc 时完全一致，
+// 清成 0 会被 bionic 判定为 tag 被截断，直接 abort。
+//
+// 正确做法：
+//   ① 不碰 tag，malloc/free/realloc 全程原样传递指针；
+//   ② 真正需要规避的是 malloc_usable_size 对「推算指针」的校验，
+//      已通过 kMallocFunctions[3] = nullptr 解决（见文件末尾）。
 
 namespace {
 
@@ -553,9 +555,13 @@ private:
     static void JsFree(JSMallocState* state, void* pointer) {
         if (pointer != nullptr) {
             auto* vm = static_cast<QuickJsVm*>(state->opaque);
+            // [MTE-FIX-3] MallocUsableSize 返回 0，RecordFree(0) 是 no-op。
             vm->RecordFree(MallocUsableSize(pointer));
         }
-        std::free(OPERIT_UNTAG(pointer));
+        // [MTE-FIX-3] 原样传指针，禁止任何 tag 处理。
+        // tombstone_06：free 收到的指针 tag 被清成 0，bionic 判为
+        // 'Pointer tag ... was truncated' 并 abort。
+        std::free(pointer);
     }
 
     static void* JsRealloc(JSMallocState* state, void* pointer, size_t size) {
@@ -568,11 +574,13 @@ private:
                 auto* vm = static_cast<QuickJsVm*>(state->opaque);
                 vm->RecordFree(old_size);
             }
-            std::free(OPERIT_UNTAG(pointer));
+            // [MTE-FIX-3] 见 JsFree 注释：free 必须原样传指针。
+            std::free(pointer);
             return nullptr;
         }
-        // 统一 untag：厂商定制 libc 在 MTE 严格模式下对 tag 挑剔。
-        void* new_pointer = std::realloc(OPERIT_UNTAG(pointer), size);
+        // [MTE-FIX-3] realloc 同样必须原样传指针：
+        // bionic 会用旧指针的 tag 校验并释放，清 tag 会 abort。
+        void* new_pointer = std::realloc(pointer, size);
         if (new_pointer != nullptr) {
             auto* vm = static_cast<QuickJsVm*>(state->opaque);
             // new_size 直接用请求 size，绕开 usable_size
