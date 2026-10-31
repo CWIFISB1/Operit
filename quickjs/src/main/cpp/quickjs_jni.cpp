@@ -5,6 +5,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <malloc.h>
+#if defined(__ANDROID__)
+#include <android/api-level.h>
+// mallopt 的 M_BIONIC_SET_HEAP_TAGGING_LEVEL / M_HEAP_TAGGING_LEVEL_NONE
+// 在 <malloc.h> 里，仅在 Android 11(API 30)+ 定义
+#endif
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -905,6 +910,44 @@ QuickJsVm* FromHandle(jlong handle) {
 }
 
 }  // namespace
+
+// ============================================================================
+// [MTE-FIX-4] 关闭本进程的 native heap pointer tagging
+//
+// 根因（tombstone_07，Android 16，五次崩溃复现）：
+//   Abort message: 'Pointer tag for 0x784b11abe0 was truncated'
+//   #00 libc.so (abort+160)
+//   #01 libc.so (free+112)
+//   #02..#14 libquickjsjni.so（引擎内部递归，0x107df8 反复）
+//
+// 为什么 JNI 层怎么做都修不好：
+//   QuickJS 把指针塞进 64 位 JSValue 做 NaN-boxing，
+//   高位被 NaN 标记占用，指针只能存低 48 位。
+//   取出来是 (void*)(uintptr_t)(v & 0xFFFFFFFFFFFF)，高 16 位被截掉，
+//   MTE tag 就在这一步丢失。崩溃地址 0x784b11abe0 高 8 位恰为 0x00。
+//   引擎内部赋值环形链反复 free 同一批指针，必然撞上 bionic 校验。
+//   所以在 JNI 边界加 untag / 传 nullptr 都是隔靴搔痒。
+//
+// 正解：让内核分配这些内存时就不打 tag。
+//   ① Manifest: android:allowNativeHeapPointerTagging="false"（主防线）
+//   ② 本函数 mallopt 降级（兜底，防部分 ROM 忽略 manifest 属性）
+// ============================================================================
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* /*reserved*/) {
+#if defined(__ANDROID__)
+    // 仅 Android 11(API 30) 起有该 mallopt 选项
+    if (android_get_device_api_level() >= 30) {
+        // 降低到 NONE：本进程所有 native 分配都不再打 tag。
+        // 取舍：放弃 MTE 的内存安全防护，换取 QuickJS NaN-boxing 兼容性。
+        // 该库只跑 JS 引擎，不处理不可信二进制输入，风险可控。
+        mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, M_HEAP_TAGGING_LEVEL_NONE);
+    }
+#endif
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    return JNI_VERSION_1_6;
+}
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_ai_assistance_operit_core_tools_javascript_QuickJsNativeBridge_nativeCreate(
