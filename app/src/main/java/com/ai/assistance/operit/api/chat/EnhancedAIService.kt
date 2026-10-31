@@ -103,6 +103,14 @@ class EnhancedAIService private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "EnhancedAIService"
+        /**
+         * [OOM-GUARD] 低于这个剩余堆就不做 token 估算。
+         *
+         * 8MB 的取值依据：估算过程需要 buildSerializedHistory 的 JSON 树
+         * + JSONObject.toString 的字符串副本，对 1MB 级历史大约是 3~5 倍放大。
+         * 崩溃现场只剩 2.4MB，明显不够，必须提前让路。
+         */
+        private const val MIN_HEAP_FOR_ESTIMATE_BYTES = 8L * 1024L * 1024L
 
         @Volatile private var INSTANCE: EnhancedAIService? = null
 
@@ -697,17 +705,56 @@ class EnhancedAIService private constructor(private val context: Context) {
         _requestWindowEstimate.value = windowSize
     }
 
+    /** 上一次成功的窗口估算值，低内存 / OOM 时降级沿用。 */
+    @Volatile private var lastRequestWindowEstimate: Long = 0L
+
+    /**
+     * 估算请求窗口大小。
+     *
+     * [OOM-GUARD] 两道闸：
+     *   1) 剩余堆 < MIN_HEAP_FOR_ESTIMATE_BYTES 时跳过本次估算，沿用上次值。
+     *      窗口大小只用于 UI 显示与截断判断，抖动一次不影响正确性，
+     *      省下的内存能保住进程。
+     *   2) 估算抛 OutOfMemoryError 时降级，不让它炸穿协程调度器。
+     *
+     * 崩溃现场依据（ClaudeProvider.parseXmlToolCalls OOM）：
+     *   堆上限 512MB，GC 后仅剩 2.4MB，还要分配 7160 字节就失败。
+     *   estimatePreparedRequestWindow 在 processToolResults 里每批工具结果调一次，
+     *   每次都让 provider 重建整段历史做估算，是最主要的累积放大点。
+     */
     private suspend fun estimatePreparedRequestWindow(
         serviceForFunction: AIService,
         preparedHistory: List<PromptTurn>,
         availableTools: List<ToolPrompt>?,
         publishEstimate: Boolean
     ): Long {
-        val windowSize =
-            serviceForFunction.calculateInputTokens(
-                chatHistory = preparedHistory,
-                availableTools = availableTools
+        val runtime = Runtime.getRuntime()
+        val used = runtime.totalMemory() - runtime.freeMemory()
+        val freeBytes = runtime.maxMemory() - used
+        if (freeBytes < MIN_HEAP_FOR_ESTIMATE_BYTES) {
+            AppLogger.w(
+                "AIService",
+                "堆余量不足(" + (freeBytes / 1024) + "KB)，跳过本次 token 估算"
             )
+            val fallback = lastRequestWindowEstimate
+            if (publishEstimate && fallback > 0L) {
+                publishRequestWindowEstimate(fallback)
+            }
+            return fallback
+        }
+        val windowSize =
+            try {
+                serviceForFunction.calculateInputTokens(
+                    chatHistory = preparedHistory,
+                    availableTools = availableTools
+                )
+            } catch (oom: OutOfMemoryError) {
+                AppLogger.e("AIService", "token 估算 OOM，已降级: " + (oom.message ?: ""))
+                lastRequestWindowEstimate
+            }
+        if (windowSize > 0L) {
+            lastRequestWindowEstimate = windowSize
+        }
         if (publishEstimate) {
             publishRequestWindowEstimate(windowSize)
         }

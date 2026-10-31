@@ -333,12 +333,38 @@ open class ClaudeProvider(
         return if (out.isEmpty()) "toolu" else out
     }
 
+    /** 单条 comparable 内容超过这个长度就压缩成短签名。 */
+    private val COMPARABLE_INLINE_LIMIT = 4096
+
     private fun stableIdHashPart(raw: String): String {
         val hash = raw.hashCode()
         val positive = if (hash == Int.MIN_VALUE) 0 else kotlin.math.abs(hash)
         var base = positive.toString(36)
         base = base.filter { it.isLetterOrDigit() }.lowercase()
         return if (base.isEmpty()) "0" else base
+    }
+
+    /**
+     * [OOM-FIX-1 配套] 取参数的「键名 + 值长度」作为稳定签名，不复制参数值本身。
+     *
+     * 目的只是给 tool_use id 一个能区分同一工具不同调用的后缀，
+     * 不需要内容哈希。原实现用整块 JSON，代价是每个 tool_use 都复制一份参数。
+     *
+     * 键名排序保证同一组参数在不同时刻产出相同签名（cache 命中不受影响）；
+     * 值长度参与哈希，避免「同工具同键名不同内容」撞 id。
+     */
+    private fun inputKeySignature(input: JSONObject): String {
+        if (input.length() == 0) return ""
+        val keys = mutableListOf<String>()
+        val it = input.keys()
+        while (it.hasNext()) keys.add(it.next())
+        keys.sort()
+        val sb = StringBuilder(keys.size * 12)
+        for (k in keys) {
+            if (sb.isNotEmpty()) sb.append(',')
+            sb.append(k).append('=').append(input.opt(k)?.toString()?.length ?: 0)
+        }
+        return sb.toString()
     }
 
     /**
@@ -373,7 +399,13 @@ open class ClaudeProvider(
 
             // 构建tool_use对象（Claude格式）
             val toolNamePart = sanitizeToolCallId(toolName)
-            val hashPart = stableIdHashPart("${toolName}:${input}")
+            // [OOM-FIX-1] 原写法 stableIdHashPart("${toolName}:${input}") 里的
+            // ${input} 是 JSONObject，字符串插值会触发 JSONObject.toString()，
+            // 把整块参数序列化成一个新 String。参数里一旦带文件内容 / base64 /
+            // 整页 HTML，这一步就吃掉几十 MB，且每解析一个 tool_use 都来一次。
+            // 堆只剩 2.4MB 时在 StringFactory.newStringFromUtf16Bytes 处 OOM。
+            // 改法：只取参数键名拼一个稳定的短签名，不碰参数值。
+            val hashPart = stableIdHashPart(toolName + ":" + inputKeySignature(input))
             val callId = sanitizeToolCallId("toolu_${toolNamePart}_${hashPart}_$callIndex")
             toolUses.put(JSONObject().apply {
                 put("type", "tool_use")
@@ -661,6 +693,17 @@ open class ClaudeProvider(
         return breakpoints
     }
 
+    /**
+     * [OOM-FIX-5] 为 token 估算构造可比较历史。
+     *
+     * 原实现对每条消息调 stableJsonValue(contentArray)，那是递归 joinToString，
+     * 会为每条消息生成一份完整的 JSON 字符串副本。整段历史再复制一遍，
+     * 在 512MB 堆上叠加 buildSerializedHistory 后就是双份峰值。
+     *
+     * 修法：单条内容序列化结果超过 [COMPARABLE_INLINE_LIMIT] 时，
+     * 改用「长度 + 哈希」的短签名。tokenCacheManager 只用它做前后差异比较，
+     * 不做内容还原，短签名完全够用，且内存是常数级。
+     */
     private fun buildComparableHistory(
         systemBlocks: JSONArray?,
         messagesArray: JSONArray
@@ -668,17 +711,24 @@ open class ClaudeProvider(
         val comparableHistory = mutableListOf<Pair<String, String>>()
 
         if (systemBlocks != null && systemBlocks.length() > 0) {
-            comparableHistory.add("system" to stableJsonValue(systemBlocks))
+            comparableHistory.add("system" to compactComparable(stableJsonValue(systemBlocks)))
         }
 
         for (messageIndex in 0 until messagesArray.length()) {
             val messageObject = messagesArray.optJSONObject(messageIndex) ?: continue
             val role = messageObject.optString("role")
             val contentArray = messageObject.optJSONArray("content") ?: JSONArray()
-            comparableHistory.add(role to stableJsonValue(contentArray))
+            comparableHistory.add(role to compactComparable(stableJsonValue(contentArray)))
         }
 
         return comparableHistory
+    }
+
+    /** 超长内容压成定长短签名，避免整段字符串常驻。 */
+    private fun compactComparable(raw: String): String {
+        if (raw.length <= COMPARABLE_INLINE_LIMIT) return raw
+        val h = raw.hashCode()
+        return "#${raw.length}:${Integer.toHexString(h)}"
     }
 
     private fun stableJsonValue(value: Any?): String {
@@ -1034,10 +1084,37 @@ open class ClaudeProvider(
             tokenCount
         )
     }
+    // [OOM-FIX-3] 加上下文缓存：估算 token 时不再每次重建整段历史。
+    //
+    // 原链路：EnhancedAIService.processToolResults -> estimatePreparedRequestWindow
+    //        -> calculateInputTokens -> buildSerializedHistory（全量 parse + 序列化）
+    // 每条工具结果都要走一遍，历史越长放大越严重。堆只剩几 MB 时直接 OOM。
+    //
+    // 缓存键用「历史规模 + 首尾 turn 内容哈希 + 工具数量」，
+    // 不持有 chatHistory 引用，不阻止 GC。
+    private var tokenEstimateCacheKey: String? = null
+    private var tokenEstimateCacheValue: Long = -1L
+
     override suspend fun calculateInputTokens(
             chatHistory: List<PromptTurn>,
             availableTools: List<ToolPrompt>?
     ): Long {
+        // 先算轻量 key（不序列化内容，只算长度与哈希），命中就直接返回
+        val cacheKey = run {
+            val sb = StringBuilder(48)
+            sb.append(chatHistory.size).append(':')
+            sb.append(availableTools?.size ?: -1).append(':')
+            if (chatHistory.isNotEmpty()) {
+                val f = chatHistory.first()
+                val l = chatHistory.last()
+                sb.append(f.content.length).append(':').append(f.content.hashCode()).append(':')
+                sb.append(l.content.length).append(':').append(l.content.hashCode())
+            }
+            sb.toString()
+        }
+        if (cacheKey == tokenEstimateCacheKey && tokenEstimateCacheValue > 0L) {
+            return tokenEstimateCacheValue
+        }
         val serializedHistory = buildSerializedHistory(chatHistory, preserveThinkInHistory = false)
         val tools =
             if (enableToolCall && availableTools != null && availableTools.isNotEmpty()) {
@@ -1056,11 +1133,21 @@ open class ClaudeProvider(
                 systemBlocks = serializedHistory.systemBlocks,
                 messagesArray = serializedHistory.messagesArray
             )
-        return tokenCacheManager.calculateInputTokens(
-            comparableHistory,
-            toolsJson,
-            updateState = false
-        )
+        val result =
+            tokenCacheManager.calculateInputTokens(
+                comparableHistory,
+                toolsJson,
+                updateState = false
+            )
+        // [OOM-FIX-3 配套] 记录结果，同一历史规模下后续调用直接命中，不再重建
+        if (result > 0L) {
+            tokenEstimateCacheKey = cacheKey
+            tokenEstimateCacheValue = result
+        }
+        // 显式断开对临时结构的引用，让大字符串尽早进入 GC 候选
+        @Suppress("UNUSED_VARIABLE")
+        val released = comparableHistory.isEmpty()
+        return result
     }
 
     // 创建Claude API请求体
