@@ -1,47 +1,44 @@
 package com.ai.assistance.operit.ui.features.chat.components.part
 
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.indication
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.SubdirectoryArrowRight
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.util.fastCoerceAtLeast
-import kotlin.math.max
+import androidx.compose.foundation.BorderStroke
+
 
 private const val CANVAS_SINGLE_LINE_TEXT_LIMIT = 160
 
@@ -56,106 +53,61 @@ internal fun CanvasToolSummaryRow(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
 ) {
-    val density = LocalDensity.current
-    val textMeasurer = rememberTextMeasurer()
-    val iconPainter = rememberVectorPainter(leadingIcon)
+    // [ANR-FIX] 原实现用 BoxWithConstraints + Canvas 手绘：
+    //   · Canvas 的 draw lambda 里调 VectorPainter.draw()
+    //   · VectorPainter.getDrawInvalidation() 每次读 snapshot state
+    //   · SnapshotStateObserver.recordRead 把每次读都塞进 MutableObjectIntMap
+    //   · 工具摘要卡片一多，这个 map 随帧增长 → 主线程 hashCode/findIndex 卡死 1000ms → ANR
+    // 现改为标准 Compose 布局（Row + Icon + Text），state 读取走 Compose 自己的
+    // 稳定路径，不再有每帧 recordRead 累加。
     val titleStyle = MaterialTheme.typography.labelMedium.copy(color = titleColor)
     val summaryStyle = MaterialTheme.typography.bodySmall.copy(color = summaryColor)
-    val measuredSummary = remember(summary) { summary.toCanvasSingleLineText() }
-    val interactionSource = remember { MutableInteractionSource() }
+    val normalizedSummary = remember(summary) { summary.toCanvasSingleLineText() }
+
+    val baseModifier = modifier
+        .fillMaxWidth()
+        .semantics { contentDescription = semanticDescription }
+
     val clickableModifier =
         if (onClick != null) {
-            Modifier
-                .semantics {
-                    contentDescription = semanticDescription
-                    role = Role.Button
-                }
+            baseModifier
+                .semantics { role = Role.Button }
                 .clickable(
-                    interactionSource = interactionSource,
+                    interactionSource = remember { MutableInteractionSource() },
                     indication = ripple(),
                     role = Role.Button,
                     onClick = onClick,
                 )
         } else {
-            Modifier.semantics { contentDescription = semanticDescription }
+            baseModifier
         }
 
-    BoxWithConstraints(modifier = modifier.fillMaxWidth().then(clickableModifier)) {
-        val widthPx = with(density) { maxWidth.roundToPx() }.fastCoerceAtLeast(1)
-        val topPaddingPx = with(density) { 4.dp.roundToPx() }
-        val iconSizePx = with(density) { 16.dp.roundToPx().toFloat() }
-        val gap1Px = with(density) { 8.dp.roundToPx().toFloat() }
-        val gap2Px = with(density) { 8.dp.roundToPx().toFloat() }
-        val titleMinWidthPx = with(density) { 80.dp.roundToPx() }
-        val titleMaxWidthPx = with(density) { 120.dp.roundToPx() }
-
-        val unconstrainedTitleLayout =
-            remember(toolName, titleStyle, textMeasurer) {
-                textMeasurer.measure(
-                    text = AnnotatedString(toolName),
-                    style = titleStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        val titleWidthPx =
-            unconstrainedTitleLayout.size.width
-                .coerceAtLeast(titleMinWidthPx)
-                .coerceAtMost(titleMaxWidthPx)
-        val titleLayout =
-            remember(toolName, titleStyle, textMeasurer, titleWidthPx) {
-                textMeasurer.measure(
-                    text = AnnotatedString(toolName),
-                    style = titleStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    constraints = Constraints(maxWidth = titleWidthPx),
-                )
-            }
-
-        val summaryMaxWidth =
-            (widthPx - iconSizePx.toInt() - gap1Px.toInt() - titleWidthPx - gap2Px.toInt())
-                .fastCoerceAtLeast(0)
-        val summaryLayout =
-            remember(measuredSummary, summaryStyle, textMeasurer, summaryMaxWidth) {
-                textMeasurer.measure(
-                    text = AnnotatedString(measuredSummary),
-                    style = summaryStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    constraints = Constraints(maxWidth = summaryMaxWidth),
-                )
-            }
-
-        val contentHeightPx =
-            max(
-                iconSizePx.toInt(),
-                max(titleLayout.size.height, summaryLayout.size.height),
-            )
-        val totalHeightPx = topPaddingPx + contentHeightPx
-
-        Canvas(
-            modifier = Modifier.fillMaxWidth().height(with(density) { totalHeightPx.toDp() })
-        ) {
-            val iconTop = topPaddingPx + (contentHeightPx - iconSizePx) / 2f
-            translate(top = iconTop) {
-                with(iconPainter) {
-                    draw(
-                        size = Size(iconSizePx, iconSizePx),
-                        colorFilter = ColorFilter.tint(titleColor.copy(alpha = 0.7f)),
-                    )
-                }
-            }
-
-            val textTopBase = topPaddingPx.toFloat()
-            val titleX = iconSizePx + gap1Px
-            val titleY = textTopBase + (contentHeightPx - titleLayout.size.height) / 2f
-            drawText(titleLayout, topLeft = Offset(titleX, titleY))
-
-            val summaryX = titleX + titleWidthPx + gap2Px
-            val summaryY = textTopBase + (contentHeightPx - summaryLayout.size.height) / 2f
-            drawText(summaryLayout, topLeft = Offset(summaryX, summaryY))
-        }
+    Row(
+        modifier = clickableModifier.padding(top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = leadingIcon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = titleColor.copy(alpha = 0.7f),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = toolName,
+            style = titleStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(min = 80.dp, max = 120.dp),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = normalizedSummary,
+            style = summaryStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -178,18 +130,15 @@ internal fun CanvasToolResultRow(
     onClick: (() -> Unit)? = null,
     onCopyClick: (() -> Unit)? = null,
 ) {
-    val density = LocalDensity.current
-    val textMeasurer = rememberTextMeasurer()
-    val arrowPainter = rememberVectorPainter(Icons.Default.SubdirectoryArrowRight)
-    val statusPainter =
-        rememberVectorPainter(
-            if (isSuccess) {
-                Icons.Default.Check
-            } else {
-                Icons.Default.Close
-            }
-        )
-    val copyPainter = rememberVectorPainter(Icons.Default.ContentCopy)
+    // [ANR-FIX-2] 原实现用 BoxWithConstraints + Canvas 手绘：
+    //   Canvas 的 draw lambda 里逐帧调 arrowPainter.draw() / statusPainter.draw() /
+    //   copyPainter.draw()，VectorPainter.getDrawInvalidation() 每帧读 snapshot state，
+    //   SnapshotStateObserver.ObservedScopeMap.recordRead 把每次读演进 MutableObjectIntMap。
+    //   工具结果行一多，这个 map 随帧膨胀，主线程 MutableObjectIntMap.findIndex
+    //   哈希查找耗时累积到 1000ms 以上 → AnrMonitor 报 ANR → 系统杀进程。
+    // 现改为标准 Compose 布局（Row + Icon + Text），
+    // state 读取走 Compose 稳定路径，不再有每帧 recordRead 累加；
+    // 同时删掉 textMeasurer.measure 与 widthPx 手工排版，减少一次同步文本测量。
     val summaryColor =
         if (isSuccess) {
             MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
@@ -199,6 +148,7 @@ internal fun CanvasToolResultRow(
     val summaryStyle =
         MaterialTheme.typography.bodySmall.copy(
             color = summaryColor,
+            fontWeight = if (emphasizeSummary) FontWeight.Medium else null,
         )
     val leadingTint =
         if (isSuccess) {
@@ -209,132 +159,70 @@ internal fun CanvasToolResultRow(
     val statusTint =
         if (isSuccess) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     val copyTint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-    val rowInteractionSource = remember { MutableInteractionSource() }
-    val copyInteractionSource = remember { MutableInteractionSource() }
+    val normalizedSummary = remember(summary) { summary.toCanvasSingleLineText() }
+
+    val baseModifier =
+        modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = semanticDescription }
+
     val rowModifier =
         if (onClick != null) {
-            Modifier
-                .semantics {
-                    contentDescription = semanticDescription
-                    role = Role.Button
-                }
-                .indication(rowInteractionSource, ripple())
+            baseModifier
+                .semantics { role = Role.Button }
                 .clickable(
-                    interactionSource = rowInteractionSource,
-                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = ripple(),
                     role = Role.Button,
                     onClick = onClick,
                 )
         } else {
-            Modifier.semantics { contentDescription = semanticDescription }
+            baseModifier
         }
 
-    BoxWithConstraints(
-        modifier =
-            modifier
-                .fillMaxWidth()
-                .then(rowModifier)
+    Row(
+        modifier = rowModifier.padding(start = 24.dp, end = 16.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        val widthPx = with(density) { maxWidth.roundToPx() }.fastCoerceAtLeast(1)
-        val startPaddingPx = with(density) { 24.dp.roundToPx() }
-        val endPaddingPx = with(density) { 16.dp.roundToPx() }
-        val verticalPaddingPx = with(density) { 2.dp.roundToPx() }
-        val arrowSizePx = with(density) { 18.dp.roundToPx().toFloat() }
-        val statusSizePx = with(density) { 14.dp.roundToPx().toFloat() }
-        val gapPx = with(density) { 8.dp.roundToPx().toFloat() }
-        val trailingSlotPx = if (onCopyClick != null) with(density) { 24.dp.roundToPx() } else 0
-        val trailingIconPx = with(density) { 14.dp.roundToPx().toFloat() }
-
-        val summaryWidthPx =
-            (widthPx - startPaddingPx - endPaddingPx - arrowSizePx.toInt() - gapPx.toInt() -
-                statusSizePx.toInt() - gapPx.toInt() - trailingSlotPx)
-                .fastCoerceAtLeast(0)
-        val summaryLayout =
-            remember(summary, summaryStyle, textMeasurer, summaryWidthPx) {
-                textMeasurer.measure(
-                    text = AnnotatedString(summary),
-                    style = summaryStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    constraints = Constraints(maxWidth = summaryWidthPx),
-                )
-            }
-
-        val contentHeightPx =
-            max(
-                max(arrowSizePx.toInt(), statusSizePx.toInt()),
-                max(summaryLayout.size.height, trailingSlotPx),
+        Icon(
+            imageVector = Icons.Default.SubdirectoryArrowRight,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = leadingTint,
+        )
+        Spacer(Modifier.width(8.dp))
+        Icon(
+            imageVector = if (isSuccess) Icons.Default.Check else Icons.Default.Close,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = statusTint,
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = normalizedSummary,
+            style = summaryStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (onCopyClick != null) {
+            Spacer(Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Default.ContentCopy,
+                contentDescription = "$semanticDescription, copy",
+                modifier =
+                    Modifier
+                        .size(24.dp)
+                        .indication(remember { MutableInteractionSource() }, ripple(bounded = false))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            role = Role.Button,
+                            onClick = onCopyClick,
+                        )
+                        .padding(5.dp),
+                tint = copyTint,
             )
-        val totalHeightPx = verticalPaddingPx * 2 + contentHeightPx
-        val trailingStartPx = widthPx - endPaddingPx - trailingSlotPx
-
-        Box(
-            modifier =
-                Modifier
-                    .fillMaxWidth()
-                    .height(with(density) { totalHeightPx.toDp() })
-        ) {
-            Canvas(modifier = Modifier.fillMaxWidth().fillMaxHeight()) {
-                val contentTop = verticalPaddingPx.toFloat()
-                val arrowTop = contentTop + (contentHeightPx - arrowSizePx) / 2f
-                translate(left = startPaddingPx.toFloat(), top = arrowTop) {
-                    with(arrowPainter) {
-                        draw(
-                            size = Size(arrowSizePx, arrowSizePx),
-                            colorFilter = ColorFilter.tint(leadingTint),
-                        )
-                    }
-                }
-
-                val statusLeft = startPaddingPx + arrowSizePx + gapPx
-                val statusTop = contentTop + (contentHeightPx - statusSizePx) / 2f
-                translate(left = statusLeft, top = statusTop) {
-                    with(statusPainter) {
-                        draw(
-                            size = Size(statusSizePx, statusSizePx),
-                            colorFilter = ColorFilter.tint(statusTint),
-                        )
-                    }
-                }
-
-                val textX = statusLeft + statusSizePx + gapPx
-                val textY = contentTop + (contentHeightPx - summaryLayout.size.height) / 2f
-                drawText(summaryLayout, topLeft = Offset(textX, textY))
-
-                if (onCopyClick != null) {
-                    val copyLeft = widthPx - endPaddingPx - trailingSlotPx + (trailingSlotPx - trailingIconPx) / 2f
-                    val copyTop = contentTop + (contentHeightPx - trailingIconPx) / 2f
-                    translate(left = copyLeft, top = copyTop) {
-                        with(copyPainter) {
-                            draw(
-                                size = Size(trailingIconPx, trailingIconPx),
-                                colorFilter = ColorFilter.tint(copyTint),
-                            )
-                        }
-                    }
-                }
-            }
-
-            if (onCopyClick != null && trailingSlotPx > 0) {
-                Box(
-                    modifier =
-                        Modifier
-                            .offset(x = with(density) { trailingStartPx.toDp() })
-                            .width(with(density) { trailingSlotPx.toDp() })
-                            .fillMaxHeight()
-                            .semantics {
-                                contentDescription = "$semanticDescription, copy"
-                                role = Role.Button
-                            }
-                            .indication(copyInteractionSource, ripple(bounded = false))
-                            .clickable(
-                                interactionSource = copyInteractionSource,
-                                indication = null,
-                                role = Role.Button,
-                                onClick = onCopyClick,
-                            )
-                )
-            }
         }
     }
 }
@@ -347,50 +235,21 @@ internal fun CanvasStatusCard(
     borderColor: Color,
     modifier: Modifier = Modifier,
 ) {
-    val density = LocalDensity.current
-    val textMeasurer = rememberTextMeasurer()
-    val textStyle = MaterialTheme.typography.bodySmall.copy(color = textColor)
-
-    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val widthPx = with(density) { maxWidth.roundToPx() }.fastCoerceAtLeast(1)
-        val horizontalPaddingPx = with(density) { 12.dp.roundToPx() }
-        val verticalPaddingPx = with(density) { 12.dp.roundToPx() }
-        val outerVerticalPx = with(density) { 4.dp.roundToPx() }
-        val cornerRadiusPx = with(density) { 8.dp.toPx() }
-        val borderWidthPx = with(density) { 1.dp.toPx() }
-
-        val textLayout =
-            remember(text, textStyle, textMeasurer, widthPx, horizontalPaddingPx) {
-                textMeasurer.measure(
-                    text = AnnotatedString(text),
-                    style = textStyle,
-                    constraints = Constraints(maxWidth = (widthPx - horizontalPaddingPx * 2).fastCoerceAtLeast(0)),
-                )
-            }
-        val cardHeightPx = textLayout.size.height + verticalPaddingPx * 2
-        val totalHeightPx = cardHeightPx + outerVerticalPx * 2
-
-        Canvas(modifier = Modifier.fillMaxWidth().height(with(density) { totalHeightPx.toDp() })) {
-            val cardTop = outerVerticalPx.toFloat()
-            drawRoundRect(
-                color = backgroundColor,
-                topLeft = Offset(0f, cardTop),
-                size = Size(size.width, cardHeightPx.toFloat()),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadiusPx, cornerRadiusPx),
-            )
-            drawRoundRect(
-                color = borderColor,
-                topLeft = Offset(0f, cardTop),
-                size = Size(size.width, cardHeightPx.toFloat()),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadiusPx, cornerRadiusPx),
-                style = Stroke(width = borderWidthPx),
-            )
-
-            drawText(
-                textLayout,
-                topLeft = Offset(horizontalPaddingPx.toFloat(), cardTop + verticalPaddingPx),
-            )
-        }
+    // [ANR-FIX-3] 原实现用 BoxWithConstraints + Canvas drawRoundRect + drawText 手绘卡片。
+    // 手绘本身不读 VectorPainter，但配 textMeasurer.measure() 会在组合期做一次
+    // 同步文本测量，卡片多时同样堆主线程。改为标准布局 + Surface 描边，
+    // 测量交给 Compose 自己的布局阶段（可跳过、可复用缓存）。
+    Surface(
+        modifier = modifier.fillMaxWidth().padding(vertical = 4.dp),
+        color = backgroundColor,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, borderColor),
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall.copy(color = textColor),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+        )
     }
 }
 
@@ -400,71 +259,46 @@ internal fun CanvasWarningStatusRow(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
 ) {
-    val density = LocalDensity.current
-    val textMeasurer = rememberTextMeasurer()
+    // [ANR-FIX-4] 原实现用 BoxWithConstraints + Canvas 画左侧竖条 + drawText 写文案。
+    // 与 CanvasStatusCard 同因：组合期同步 textMeasurer.measure()。
+    // 改为 Row + Box(竖条) + Text，测量交给布局阶段。
     val barColor = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
     val textColor = MaterialTheme.colorScheme.error.copy(alpha = 0.9f)
     val textStyle = MaterialTheme.typography.bodySmall.copy(color = textColor)
-    val interactionSource = remember { MutableInteractionSource() }
+
+    val baseModifier = modifier.fillMaxWidth()
     val clickableModifier =
         if (onClick != null) {
-            Modifier
+            baseModifier
                 .semantics { role = Role.Button }
                 .clickable(
-                    interactionSource = interactionSource,
+                    interactionSource = remember { MutableInteractionSource() },
                     indication = ripple(),
                     role = Role.Button,
                     onClick = onClick,
                 )
         } else {
-            Modifier
+            baseModifier
         }
 
-    BoxWithConstraints(
-        modifier =
-            modifier
-                .fillMaxWidth()
-                .then(clickableModifier)
+    Row(
+        modifier = clickableModifier.padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        val widthPx = with(density) { maxWidth.roundToPx() }.fastCoerceAtLeast(1)
-        val barWidthPx = with(density) { 2.dp.toPx() }
-        val barHeightPx = with(density) { 16.dp.toPx() }
-        val gapPx = with(density) { 8.dp.roundToPx().toFloat() }
-        val verticalPaddingPx = with(density) { 6.dp.roundToPx() }
-        val cornerRadiusPx = with(density) { 999.dp.toPx() }
-
-        val textLayout =
-            remember(summaryText, textStyle, textMeasurer, widthPx, gapPx, barWidthPx) {
-                textMeasurer.measure(
-                    text = AnnotatedString(summaryText),
-                    style = textStyle,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    constraints =
-                        Constraints(
-                            maxWidth =
-                                (widthPx - barWidthPx.toInt() - gapPx.toInt()).fastCoerceAtLeast(0)
-                        ),
-                )
-            }
-
-        val contentHeightPx = max(barHeightPx.toInt(), textLayout.size.height)
-        val totalHeightPx = verticalPaddingPx * 2 + contentHeightPx
-
-        Canvas(modifier = Modifier.fillMaxWidth().height(with(density) { totalHeightPx.toDp() })) {
-            val top = verticalPaddingPx.toFloat()
-            val barTop = top + (contentHeightPx - barHeightPx) / 2f
-            drawRoundRect(
-                color = barColor,
-                topLeft = Offset(0f, barTop),
-                size = Size(barWidthPx, barHeightPx),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerRadiusPx, cornerRadiusPx),
-            )
-
-            drawText(
-                textLayout,
-                topLeft = Offset(barWidthPx + gapPx, top + (contentHeightPx - textLayout.size.height) / 2f),
-            )
-        }
+        Box(
+            modifier =
+                Modifier
+                    .width(2.dp)
+                    .height(16.dp)
+                    .background(barColor, RoundedCornerShape(percent = 50))
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = remember(summaryText) { summaryText.toCanvasSingleLineText() },
+            style = textStyle,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
     }
 }

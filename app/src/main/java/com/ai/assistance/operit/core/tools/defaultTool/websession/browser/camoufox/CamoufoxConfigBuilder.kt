@@ -27,8 +27,16 @@ import org.json.JSONObject
  */
 internal object CamoufoxConfigBuilder {
 
-    /** 官方切块大小。与 camoufox/utils.py 的 chunk_size 保持一致。 */
-    private const val CHUNK_SIZE = 4000
+    /**
+     * 官方切块大小。
+     *
+     * 2026-10-31 核对 camoufox/utils.py 实测值：
+     *   chunk_size = 2047 if OS_NAME == 'win' else 32767
+     * 我们跑在 Linux（proot Ubuntu）上，所以取 32767。
+     * 原值 4000 不会丢数据（切片只是分块），但会多切出几个环境变量，
+     * 且与官方不一致，排障时容易误判。统一到官方值。
+     */
+    private const val CHUNK_SIZE = 32767
 
     /**
      * 构建扁平配置 JSON。
@@ -69,7 +77,27 @@ internal object CamoufoxConfigBuilder {
         o.put("audio:seed", if (seed == 0) 1 else Math.abs(seed))
 
         // ---- locale / timezone ----
+        //
+        // 2026-10-31 修复：languages 字段此前**完全没写进 CAMOU_CONFIG**，
+        // 于是 navigator.languages 一直是宿主默认 en-US,en，
+        // UA 说 Windows 但语言只有 en-US，对中文站点是明显穿帮。
+        //
+        // Camoufox 的 locale 键名是冒号分隔的三段（camoufox/locales.py as_config()）：
+        //   locale:language  = 主语言（如 en / zh）
+        //   locale:region    = 区域（如 US / CN）
+        //   locale:script    = 书写系统（如 Latn / Hans）
+        // 主语言取 languages[0]，按 "-" 拆成 language-region，再补 script。
         if (fp.timezone.isNotBlank()) o.put("timezone", fp.timezone)
+        val primary = fp.languages.firstOrNull()?.trim().orEmpty()
+        if (primary.isNotEmpty()) {
+            val parts = primary.replace('_', '-').split('-')
+            val lang = parts.getOrNull(0)?.lowercase().orEmpty()
+            val region = parts.getOrNull(1)?.uppercase().orEmpty()
+            if (lang.isNotEmpty()) o.put("locale:language", lang)
+            if (region.isNotEmpty()) o.put("locale:region", region)
+            val script = scriptFor(lang, region)
+            if (script.isNotEmpty()) o.put("locale:script", script)
+        }
 
         // ---- 字体 ----
         if (fp.fonts.isNotEmpty()) {
@@ -116,6 +144,21 @@ internal object CamoufoxConfigBuilder {
      * 于是 UA 说 Windows、appVersion 说 Linux，页面两个属性一读就露馅。
      * 形如 "5.0 (Windows)"。
      */
+    /**
+     * 由 language/region 推导 BCP-47 script。
+     *
+     * 只覆盖高频组合：中文区分简繁，其余给 Latn。
+     * 需要更精确时由调用方直接给 languages 里的 script 段（本实现忽略，够用）。
+     */
+    private fun scriptFor(lang: String, region: String): String = when {
+        lang == "zh" && region in setOf("CN", "SG", "MY") -> "Hans"
+        lang == "zh" && region in setOf("TW", "HK", "MO") -> "Hant"
+        lang == "ja" || lang == "ko" -> "Jpan".let { if (lang == "ko") "Kore" else it }
+        lang in setOf("ar", "fa", "ur", "he") -> "Arab".let { if (lang == "he") "Hebr" else it }
+        lang == "ru" || lang == "uk" || lang == "bg" -> "Cyrl"
+        else -> "Latn"
+    }
+
     private fun appVersionFrom(ua: String): String = when {
         ua.contains("Windows NT") -> "5.0 (Windows)"
         ua.contains("Macintosh") -> "5.0 (Macintosh)"

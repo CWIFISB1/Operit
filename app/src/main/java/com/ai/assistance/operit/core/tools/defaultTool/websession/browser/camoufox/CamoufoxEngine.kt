@@ -42,20 +42,47 @@ data class CamoufoxFingerprint(
     val hardwareConcurrency: Int = 0,
     /** navigator.maxTouchPoints。 */
     val maxTouchPoints: Int = 0,
-    /** 屏幕尺寸。0 表示不设置。 */
-    val screenWidth: Int = 0,
-    val screenHeight: Int = 0,
+    /**
+     * 屏幕尺寸。
+     *
+     * 2026-10-31 修复：默认 0 表示不写 CAMOU_CONFIG，Camoufox 回落宿主值。
+     * 实测宿主给的是 1920x1080 但 screen.availWidth/availHeight 未设置，
+     * 页面读到 availHeight == height（无任务栏），Windows 桌面几乎不可能这样。
+     * 默认取官方 windows 预设的真实采样：1920x1080，可用区 1920x1032。
+     */
+    val screenWidth: Int = 1920,
+    val screenHeight: Int = 1080,
     val screenColorDepth: Int = 24,
     /** 可用区域，通常 avWidth=width，avHeight=height-任务栏。 */
-    val screenAvailWidth: Int = 0,
-    val screenAvailHeight: Int = 0,
-    /** WebGL 伪装厂商，如 "Google Inc. (Intel)"。 */
-    val webglVendor: String = "",
-    /** WebGL 伪装渲染器，如 "ANGLE (Intel, Intel(R) HD Graphics 400 Direct3D11 vs_5_0 ps_5_0)"。 */
-    val webglRenderer: String = "",
+    val screenAvailWidth: Int = 1920,
+    val screenAvailHeight: Int = 1032,
+    /**
+     * WebGL 伪装厂商。
+     *
+     * 2026-10-31 修复：默认空串时 CAMOU_CONFIG 不写 webGl:vendor，
+     * Camoufox 回落宿主值 —— 实测拿到 "Mesa"，这是 Linux 软件渲染的
+     * 独有标识，比 llvmpipe 还刺眼。默认给一段真实 Windows + Intel 设备的组合。
+     */
+    val webglVendor: String = "Google Inc. (Intel)",
+    /**
+     * WebGL 伪装渲染器。
+     *
+     * 取 camoufox 官方 fingerprint-presets.json windows 组的真实采样值：
+     *   "ANGLE (Intel, Intel(R) HD Graphics 400 Direct3D11 vs_5_0 ps_5_0), or similar"
+     * 去掉尾部 ", or similar"（那是官方用来做渲染器洗牌的占位后缀，
+     * 直接暴露在 getParameter 里反而不自然）。
+     */
+    val webglRenderer: String =
+        "ANGLE (Intel, Intel(R) HD Graphics 400 Direct3D11 vs_5_0 ps_5_0)",
     /** IANA 时区，如 America/New_York。 */
     val timezone: String = "America/New_York",
-    /** 语言列表，第一个为主语言。 */
+    /**
+     * 语言列表，第一个为主语言。
+     *
+     * 2026-10-31 修复配套：CamoufoxConfigBuilder 现在会把 languages[0]
+     * 拆成 locale:language / locale:region / locale:script 写进 CAMOU_CONFIG，
+     * 否则 navigator.languages 一直是宿主默认 en-US,en。
+     */
     val languages: List<String> = listOf("en-US", "en"),
     /** 字体列表。留空则用预设。 */
     val fonts: List<String> = emptyList(),
