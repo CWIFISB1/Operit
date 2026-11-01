@@ -842,6 +842,24 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
     val activeSession = activeId?.let(::sessionById)
     val orderedIds = registry.orderedSessionIds
 
+    // [WHITE-SCREEN-FIX] 2026-11-01 真机复测定位：
+    // 旧判定 isCloakEngine = isCloak && session.cloakClient != null 恒为 false，
+    // 因为 cloakClient 全仓从未被赋过非 null 值（ensureEngine 只写进
+    // CloakBrowserTools.sessions 这张运行时表，没回写会话字段）。
+    // 结果 UI 永远走 WebView 分支，而该会话根本没建 WebView → 正文整片白，
+    // 但顶部芯片仍显示 Cloak。
+    // 这里改为「会话字段优先，运行时表兜底」的实时探测，直接修正判定。
+    val liveCloak =
+        runCatching {
+            if (activeSession == null || !activeSession.isCloak || activeSession.isCamoufox) {
+                null
+            } else {
+                activeSession.cloakClient
+                    ?: com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                        .CloakBrowserTools.clientOf(activeSession.id)
+            }
+        }.getOrNull()
+
     return WebSessionBrowserState(
         activeSessionId = activeId,
         pageTitle = activeSession?.pageTitle.orEmpty(),
@@ -853,8 +871,8 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
         // 降级到 WebView 后 isCloak 会变成 false，这里自动跟着切成 WebView 渲染，
         // 不会出现「UI 还在等 Cloak 画面、实际 WebView 已经在跑」的黑屏。
         engineLabel = if (activeSession?.isCloak == true) "Cloak" else "WebView",
-        engineReady = activeSession?.cloakClient != null,
-        isCloakEngine = activeSession?.isCloak == true && activeSession?.cloakClient != null,
+        engineReady = liveCloak != null,
+        isCloakEngine = activeSession?.isCloak == true && liveCloak != null,
         currentUrl = activeSession?.currentUrl?.ifBlank { "about:blank" } ?: "about:blank",
         canGoBack = activeSession?.canGoBack == true,
         canGoForward = activeSession?.canGoForward == true,

@@ -382,6 +382,19 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
             )
             return false
         }
+
+        // [WHITE-SCREEN-FIX] 2026-11-01 真机复测：
+        // ensureEngine 只把 CDP 客户端存进了 CloakBrowserTools.sessions 这张表，
+        // WebSession.cloakClient 全仓从未被赋过非 null 值。
+        // 而 buildBrowserState 用 `session.cloakClient != null` 来判定 isCloakEngine，
+        // 于是这个标记恒为 false，UI 永远走 WebView 分支 —— 但该会话根本没建过 WebView，
+        // 结果就是顶部显示 Cloak、正文整片白。
+        // 修法：探测成功后把客户端回写到会话字段，UI 才能切到 CloakSurfaceView。
+        if (!session.isCamoufox) {
+            session.cloakClient =
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools
+                    .clientOf(session.id)
+        }
         return true
     }
 
