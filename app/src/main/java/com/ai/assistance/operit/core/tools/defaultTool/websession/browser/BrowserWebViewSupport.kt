@@ -757,8 +757,57 @@ internal fun StandardBrowserSessionTools.navigateSessionOnMain(
 internal fun StandardBrowserSessionTools.openUrlOnMain(appContext: Context, url: String) {
     val existingSession = getActiveSessionOnMain()
     val session = existingSession ?: createSessionTabOnMain(appContext, initialUrl = url)
+
+    // [UI-NAV-FIX] 2026-11-01 真机第四次复测：
+    // 用户在地栏输入地址后界面不跳转，但工具通道 browser:goto 正常。
+    // 原因：工具通道在 StandardBrowserSessionTools 里做了引擎分流
+    // （BrowserEngineBridge.navigate，CLOAK 走 CDP），
+    // 而 UI 这条 openUrlOnMain 只调 navigateSessionOnMain → session.webView.loadUrl()，
+    // 是纯 WebView 路径。Cloak 会话根本没有可用的 WebView，
+    // loadUrl 打在一个不可见、也没接渲染的 WebView 上，等于什么都没做。
+    // 修法：UI 导航同样按引擎分流，CLOAK/CAMOUFOX 走 BrowserEngineBridge。
+    val engine = runCatching { session.engine }.getOrNull()
+    if (engine != null &&
+        engine != com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.WEBVIEW
+    ) {
+        val routed = runCatching {
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
+                .navigate(appContext, session.id, engine, url)
+        }
+        if (routed.isSuccess) {
+            session.currentUrl = url
+            session.pageLoaded = true
+            session.isLoading = false
+            session.hasSslError = false
+            session.lastSnapshot = null
+            updateNavigationState(session)
+            refreshSessionUiOnMain(session.id)
+            return
+        }
+        // 分流失败时记一条，随后仍落到 WebView 路径，保证不至于完全没反应。
+        com.ai.assistance.operit.util.AppLogger.w(
+            "BrowserNav",
+            "UI 导航分流 ${engine.name} 失败，回落 WebView: ${routed.exceptionOrNull()?.message}"
+        )
+    }
+
     if (existingSession != null) {
         navigateSessionOnMain(session, url)
+    } else if (engine != null &&
+        engine != com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.WEBVIEW
+    ) {
+        // [UI-NAV-FIX] 新建 Cloak 标签页时 createSessionTabOnMain 只把 URL 交给 WebView，
+        // 而 Cloak 会话不渲染 WebView，因此必须单独向 CDP 发一次导航，
+        // 否则新标签会停在 about:blank。
+        runCatching {
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
+                .navigate(appContext, session.id, engine, url)
+        }.onFailure {
+            com.ai.assistance.operit.util.AppLogger.w(
+                "BrowserNav",
+                "新标签 Cloak 导航失败: ${it.message}"
+            )
+        }
     }
     ensureSessionAttachedOnMain(session.id)
 }
