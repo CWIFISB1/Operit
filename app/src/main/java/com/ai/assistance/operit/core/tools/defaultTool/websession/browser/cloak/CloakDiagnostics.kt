@@ -386,6 +386,153 @@ new Promise((res)=>{
         }
     }
 
+    // ================================================================
+    // [NODE-SUB] 订阅导入与节点启停
+    // ================================================================
+
+    /**
+     * 导入订阅：下载 → 解析 → 落盘。
+     *
+     * 支持三种形态：
+     *   1. base64 节点列表（绝大多数机场）
+     *   2. 明文 URI 列表
+     *   3. Clash YAML
+     */
+    fun subImport(url: String): String {
+        val body = runCatching { httpGet(url) }.getOrNull()
+            ?: return "订阅下载失败：$url\n检查地址是否失效、是否需要网络代理"
+        if (body.isBlank()) return "订阅内容为空：$url"
+
+        // 有的订阅需要 UA，有的返回 HTML 跳转页
+        if (body.trimStart().startsWith("<!DOCTYPE", true) ||
+            body.trimStart().startsWith("<html", true)
+        ) {
+            return "订阅返回的是 HTML 页面（多半已失效或换了域名），不是节点数据。\n" +
+                "前 200 字符：${body.take(200)}"
+        }
+
+        val nodes = CloakNodeParser.parse(body)
+        if (nodes.isEmpty()) {
+            return "解析出 0 个节点。\n内容前 200 字符：${body.take(200)}"
+        }
+
+        // 落盘需要 Context，这里由调用方传；为简化先存进内存并返回摘要
+        lastImported = nodes
+        val byType = nodes.groupingBy { it.type }.eachCount()
+            .entries.sortedByDescending { it.value }
+            .joinToString(", ") { "${it.key}=${it.value}" }
+
+        return buildString {
+            append("✅ 订阅解析成功\n")
+            append("来源    : ").append(url).append('\n')
+            append("节点数  : ").append(nodes.size).append('\n')
+            append("协议分布: ").append(byType).append('\n')
+            append("\n前 10 个节点：\n")
+            nodes.take(10).forEachIndexed { i, n ->
+                append("  ").append(i + 1).append(". [").append(n.type).append("] ")
+                append(n.name).append("  ").append(n.host).append(':').append(n.port)
+                val r = n.regionHint()
+                if (r.isNotBlank()) append("  (").append(r).append(')')
+                append('\n')
+            }
+            if (nodes.size > 10) append("  ... 其余 ").append(nodes.size - 10).append(" 个\n")
+            append("\n下一步：action=substart node=<序号或名称> slot=<槽位>")
+        }
+    }
+
+    /** 最近一次导入的节点（进程内缓存）。 */
+    @Volatile private var lastImported: List<CloakNodeParser.Node> = emptyList()
+
+    /**
+     * 启动指定节点，暴露成本地 socks5，并绑定到槽位。
+     *
+     * @param nodeSpec 序号（1-based）或节点名关键词
+     * @param slotName 要绑定的槽位
+     */
+    fun subStart(context: Context, nodeSpec: String, slotName: String): String {
+        val nodes = lastImported.ifEmpty { CloakNodeRunner.loadNodes(context) }
+        if (nodes.isEmpty()) {
+            return "还没有导入任何节点。先执行 action=subimport url=<订阅地址>"
+        }
+
+        // 优先按序号，其次按名称模糊匹配
+        val idx = nodeSpec.trim().toIntOrNull()
+        val node = if (idx != null && idx in 1..nodes.size) {
+            nodes[idx - 1]
+        } else {
+            nodes.firstOrNull { it.name.contains(nodeSpec, ignoreCase = true) }
+        } ?: return "找不到节点：$nodeSpec\n可用节点数 ${nodes.size}，用序号 1..${nodes.size} 或名称关键词"
+
+        val slot = CloakSlotStore.find(context, slotName)
+            ?: return "槽位 $slotName 不存在。先 action=new slot=$slotName 建一个"
+
+        // 启动 mihomo
+        val addr = CloakNodeRunner.start(context, node, slot.name)
+            ?: return "节点启动失败。检查 mihomo 是否可执行、节点是否有效。"
+
+        // 把本地 socks5 写入槽位的 proxy 字段
+        val slots = CloakSlotStore.load(context)
+        val updated = slots.map {
+            if (it.name == slot.name) {
+                it.copy(proxy = addr, note = "由节点「${node.name}」提供出口")
+            } else it
+        }
+        CloakSlotStore.save(context, updated)
+
+        // 探测出口地理
+        val geo = CloakGeoResolver.resolve(addr)
+
+        return buildString {
+            append("✅ 节点已启动并绑定到槽位 ").append(slot.name).append('\n')
+            append("节点    : [").append(node.type).append("] ").append(node.name).append('\n')
+            append("服务器  : ").append(node.host).append(':').append(node.port).append('\n')
+            append("本地代理: ").append(addr).append('\n')
+            if (geo.ok) {
+                append("出口 IP : ").append(geo.ip).append('\n')
+                append("归属    : ").append(geo.country).append(' ').append(geo.city)
+                    .append(" / ").append(geo.timezone).append('\n')
+                append("ISP     : ").append(geo.isp).append('\n')
+                append("质量    : ").append(geo.riskNote()).append('\n')
+                append("\n指纹将自动对齐为：时区 ").append(geo.timezone)
+                    .append("  语言 ").append(CloakGeoResolver.languageFor(geo.countryCode)).append('\n')
+            } else {
+                append("出口探测: 失败（").append(geo.error).append("）\n")
+                append("⚠️ 无法确认 IP 归属，指纹时区可能与实际出口矛盾\n")
+            }
+            append("\n下一步：browser_switch_engine engine=cloak fingerprint=slot=").append(slot.name)
+        }
+    }
+
+    /** 列出已导入的节点。 */
+    fun subNodes(context: Context): String {
+        val nodes = lastImported.ifEmpty { CloakNodeRunner.loadNodes(context) }
+        if (nodes.isEmpty()) return "还没有导入任何节点。action=subimport url=<订阅地址>"
+        return buildString {
+            append("已导入节点 ").append(nodes.size).append(" 个\n")
+            append("---\n")
+            nodes.forEachIndexed { i, n ->
+                append(i + 1).append(". [").append(n.type).append("] ")
+                append(n.name).append("\n   ").append(n.host).append(':').append(n.port)
+                val r = n.regionHint()
+                if (r.isNotBlank()) append("  (").append(r).append(')')
+                append('\n')
+            }
+        }
+    }
+
+    /** 简单 HTTP GET，支持自动跟随重定向。 */
+    private fun httpGet(url: String): String {
+        val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 15_000
+        conn.readTimeout = 25_000
+        conn.instanceFollowRedirects = true
+        conn.setRequestProperty(
+            "User-Agent",
+            "clash-verge/v2.0.0 Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        )
+        return conn.inputStream.use { String(it.readBytes(), Charsets.UTF_8) }
+    }
+
     /** 删除槽位（含 Cookie）。 */
     fun deleteSlot(context: Context, name: String): String {
         if (name == CloakSlotStore.DEFAULT_SLOT) {

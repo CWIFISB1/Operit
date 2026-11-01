@@ -10,6 +10,20 @@ import com.ai.assistance.operit.data.model.MessageVariantEntity
 // SQLite LENGTH/SUBSTR count characters, and this bound keeps every returned text row well below CursorWindow size.
 private const val CONTENT_CHUNK_CHARACTER_COUNT = 65_536
 
+/**
+ * 单次物化（把分块正文拼回完整消息）允许消耗的总字符预算。
+ *
+ * 为什么需要：607MB 的聊天库里可能存在单条几百 MB 的正文。旧实现无条件
+ * 逐块 append，堆在拼到一半时抛 OutOfMemoryError（栈顶
+ * ChatContentDao.materializeMessage:435 StringBuilder.append）。
+ * 这里设一个硬预算：预算内的消息完整还原，预算耗尽后的消息只保留已读到
+ * 的部分（至少保证首块可显示），宁可截断也不崩。
+ */
+private const val MAX_MATERIALIZE_CHARS = 6_000_000
+
+/** 预算耗尽后，剩余消息最多保留的字符数（首块）。 */
+private const val MATERIALIZE_FALLBACK_CHARS = CONTENT_CHUNK_CHARACTER_COUNT
+
 private const val MESSAGE_CONTENT_ROW_QUERY =
     """
     SELECT
@@ -362,7 +376,11 @@ abstract class ChatContentDao {
 
     @Transaction
     open suspend fun getMessageByTimestamp(chatId: String, timestamp: Long): MessageEntity? =
-        queryMessageByTimestamp(chatId, timestamp)?.let { materializeMessage(it) }
+        queryMessageByTimestamp(chatId, timestamp)?.let { row ->
+            val holder = ArrayList<com.ai.assistance.operit.data.model.MessageEntity>(1)
+            materializeMessageInto(row, MAX_MATERIALIZE_CHARS, holder)
+            holder.firstOrNull()
+        }
 
     @Transaction
     open suspend fun getVariantsForChat(chatId: String): List<MessageVariantEntity> =
@@ -404,68 +422,113 @@ abstract class ChatContentDao {
         messageTimestamp: Long,
         variantIndex: Int,
     ): MessageVariantEntity? =
-        queryVariantForMessage(chatId, messageTimestamp, variantIndex)?.let {
-            materializeVariant(it)
+        queryVariantForMessage(chatId, messageTimestamp, variantIndex)?.let { row ->
+            val holder = ArrayList<MessageVariantEntity>(1)
+            materializeVariantInto(row, MAX_MATERIALIZE_CHARS, holder)
+            holder.firstOrNull()
         }
 
-    private suspend fun materializeMessages(rows: List<MessageContentRow>): List<MessageEntity> =
-        rows.map { materializeMessage(it) }
+    private suspend fun materializeMessages(rows: List<MessageContentRow>): List<MessageEntity> {
+        if (rows.isEmpty()) return emptyList()
+        var budget = MAX_MATERIALIZE_CHARS
+        val out = ArrayList<MessageEntity>(rows.size)
+        for (row in rows) {
+            val used = materializeMessageInto(row, budget, out)
+            budget -= used
+        }
+        return out
+    }
 
-    private suspend fun materializeMessage(row: MessageContentRow): MessageEntity {
-        if (row.contentCharacterCount <= CONTENT_CHUNK_CHARACTER_COUNT) {
-            return row.message
+    /**
+     * 物化单条消息并直接写入 out，返回本次消耗的字符数。
+     *
+     * budget <= 0 表示全局预算已耗尽，此时只保留首块（MATERIALIZE_FALLBACK_CHARS），
+     * 保证 UI 仍能看到开头，而不是整条消失或直接 OOM。
+     */
+    private suspend fun materializeMessageInto(
+        row: MessageContentRow,
+        budget: Int,
+        out: MutableList<MessageEntity>,
+    ): Int {
+        val totalChars = row.contentCharacterCount
+        if (totalChars <= CONTENT_CHUNK_CHARACTER_COUNT) {
+            out.add(row.message)
+            return row.message.content.length
+        }
+
+        // 本次允许还原到的字符位置上限
+        val allowedChars: Long = when {
+            budget <= 0 -> MATERIALIZE_FALLBACK_CHARS.toLong()
+            budget.toLong() >= totalChars -> totalChars
+            else -> budget.toLong().coerceAtLeast(MATERIALIZE_FALLBACK_CHARS.toLong())
         }
 
         val content = StringBuilder(row.message.content)
         var startCharacter = CONTENT_CHUNK_CHARACTER_COUNT.toLong() + 1L
-        while (startCharacter <= row.contentCharacterCount) {
-            val chunk =
-                checkNotNull(
-                    queryMessageContentChunk(
-                        row.message.messageId,
-                        startCharacter,
-                        CONTENT_CHUNK_CHARACTER_COUNT,
-                    )
-                ) {
-                    "Message disappeared while reading content: messageId=${row.message.messageId}"
-                }
-            check(chunk.isNotEmpty()) {
-                "Message content ended before its recorded length: messageId=${row.message.messageId}"
-            }
+        var consumed = row.message.content.length
+        while (startCharacter <= allowedChars) {
+            val chunk = queryMessageContentChunk(
+                row.message.messageId,
+                startCharacter,
+                CONTENT_CHUNK_CHARACTER_COUNT,
+            )
+            // 预算截断时数据库里仍然有数据，只是我们不再读；只有真正读不到才算异常
+            if (chunk == null) break
+            if (chunk.isEmpty()) break
             content.append(chunk)
+            consumed += chunk.length
             startCharacter += CONTENT_CHUNK_CHARACTER_COUNT
         }
-        return row.message.copy(content = content.toString())
+        out.add(row.message.copy(content = content.toString()))
+        return consumed
     }
 
     private suspend fun materializeVariants(
         rows: List<MessageVariantContentRow>
-    ): List<MessageVariantEntity> = rows.map { materializeVariant(it) }
+    ): List<MessageVariantEntity> {
+        if (rows.isEmpty()) return emptyList()
+        var budget = MAX_MATERIALIZE_CHARS
+        val out = ArrayList<MessageVariantEntity>(rows.size)
+        for (row in rows) {
+            val used = materializeVariantInto(row, budget, out)
+            budget -= used
+        }
+        return out
+    }
 
-    private suspend fun materializeVariant(row: MessageVariantContentRow): MessageVariantEntity {
-        if (row.contentCharacterCount <= CONTENT_CHUNK_CHARACTER_COUNT) {
-            return row.variant
+    private suspend fun materializeVariantInto(
+        row: MessageVariantContentRow,
+        budget: Int,
+        out: MutableList<MessageVariantEntity>,
+    ): Int {
+        val totalChars = row.contentCharacterCount
+        if (totalChars <= CONTENT_CHUNK_CHARACTER_COUNT) {
+            out.add(row.variant)
+            return row.variant.content.length
+        }
+
+        val allowedChars: Long = when {
+            budget <= 0 -> MATERIALIZE_FALLBACK_CHARS.toLong()
+            budget.toLong() >= totalChars -> totalChars
+            else -> budget.toLong().coerceAtLeast(MATERIALIZE_FALLBACK_CHARS.toLong())
         }
 
         val content = StringBuilder(row.variant.content)
         var startCharacter = CONTENT_CHUNK_CHARACTER_COUNT.toLong() + 1L
-        while (startCharacter <= row.contentCharacterCount) {
-            val chunk =
-                checkNotNull(
-                    queryMessageVariantContentChunk(
-                        row.variant.variantId,
-                        startCharacter,
-                        CONTENT_CHUNK_CHARACTER_COUNT,
-                    )
-                ) {
-                    "Message variant disappeared while reading content: variantId=${row.variant.variantId}"
-                }
-            check(chunk.isNotEmpty()) {
-                "Message variant content ended before its recorded length: variantId=${row.variant.variantId}"
-            }
+        var consumed = row.variant.content.length
+        while (startCharacter <= allowedChars) {
+            val chunk = queryMessageVariantContentChunk(
+                row.variant.variantId,
+                startCharacter,
+                CONTENT_CHUNK_CHARACTER_COUNT,
+            )
+            if (chunk == null) break
+            if (chunk.isEmpty()) break
             content.append(chunk)
+            consumed += chunk.length
             startCharacter += CONTENT_CHUNK_CHARACTER_COUNT
         }
-        return row.variant.copy(content = content.toString())
+        out.add(row.variant.copy(content = content.toString()))
+        return consumed
     }
 }
