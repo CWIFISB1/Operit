@@ -71,6 +71,13 @@ internal object CloakLauncher {
      * 在 proot 内执行命令并取回 stdout。
      * 超时或失败返回 null，并记录日志。
      */
+    /**
+     * 对外暴露的 proot 执行入口，供 CloakSlotStore 读写槽位表使用。
+     * 内部实现与 [proot] 完全一致，只是可见性放宽。
+     */
+    internal fun prootPublic(context: Context, command: String, timeoutMs: Long = 60_000L): String? =
+        proot(context, command, timeoutMs)
+
     private fun proot(context: Context, command: String, timeoutMs: Long = 60_000L): String? {
         return runCatching {
             runBlocking {

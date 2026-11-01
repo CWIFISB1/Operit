@@ -16,7 +16,14 @@ internal object CloakBrowserTools {
 
     private class SessionState(
         @Volatile var client: CloakCdpClient? = null,
-        @Volatile var fingerprint: CloakFingerprint = CloakFingerprint()
+        @Volatile var fingerprint: CloakFingerprint = CloakFingerprint(),
+        /**
+         * 该会话绑定的身份槽位名（见 CloakSlotStore）。
+         *
+         * 之所以要单独记：指纹对象里虽然有 profileId，但从 profileId 反查槽位名
+         * 需要读盘；而切换引擎/重启时需要「沿用同一槽位」，直接拿名字最快。
+         */
+        @Volatile var slotName: String? = null
     )
 
     private val sessions = ConcurrentHashMap<String, SessionState>()
@@ -40,6 +47,14 @@ internal object CloakBrowserTools {
     /** 读取会话指纹。 */
     fun fingerprintOf(sessionId: String): CloakFingerprint? =
         sessions[sessionId]?.fingerprint
+
+    /** 读取会话绑定的身份槽位名。 */
+    fun slotOf(sessionId: String): String? = sessions[sessionId]?.slotName
+
+    /** 绑定身份槽位（不启停引擎，只记录归属）。 */
+    fun bindSlot(sessionId: String, slotName: String) {
+        stateOf(sessionId).slotName = slotName
+    }
 
     /** 启动并绑定。 */
     fun start(context: Context, sessionId: String, config: CloakFingerprint): String {

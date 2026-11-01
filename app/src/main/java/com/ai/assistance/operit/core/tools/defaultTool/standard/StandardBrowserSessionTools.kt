@@ -497,36 +497,69 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                 }
                 val sid = session.id
 
-                // [FINGERPRINT-ROTATION] 2026-11-01 新增：
-                // 工具声明里一直有 fingerprint 参数，但代码从来没读过它（全仓 0 处引用），
-                // 传了等于没传，每次切换引擎拿到的都是同一套默认指纹。
-                // 现在按参数生成指纹：显式传种子则确定性复现，不传则每次随机一套新的。
-                val seedParam = param(tool, "fingerprint")?.trim().orEmpty()
-                val seed = seedParam.ifBlank {
-                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
-                        .CloakFingerprintFactory.randomSeed()
+                // [IDENTITY-SLOT] 2026-11-01 最终版：
+                //
+                // 参数语义（fingerprint 字段沿用旧名，避免破坏已有调用）：
+                //   · 不传          → 沿用会话当前绑定槽位；若没有则用 default
+                //   · slot=new      → 新建一个随机身份槽位（新 Cookie 目录 + 新指纹）
+                //   · slot=reg001   → 切到指定槽位（Cookie 与指纹一起切）
+                //   · 传其它任意值  → 当作「槽位名」，不存在则创建
+                //
+                // 为什么不再「不传就随机换」：
+                //   profileId 决定了 Cookie 的落盘目录。若每次切换都换 profileId，
+                //   等于每次清空登录态 —— 今天注册的号明天打开就要重登，
+                //   而且服务端看到「同账号天天换设备」反而更可疑。
+                //   指纹必须**跟着账号走**，不跟着窗口走。
+                val slotStore = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                    .CloakSlotStore
+                val slotParam = param(tool, "fingerprint")?.trim().orEmpty()
+                val slotName: String
+                val slotSeed: String
+                val slotProfile: String
+                if (slotParam.isNotBlank()) {
+                    val spec = if (slotParam.startsWith("slot=")) slotParam.removePrefix("slot=") else slotParam
+                    if (spec.equals("new", ignoreCase = true) || spec.isBlank()) {
+                        val s = slotStore.createSlot(context.applicationContext)
+                        slotName = s.name; slotSeed = s.seed; slotProfile = s.profileId
+                    } else {
+                        val existing = slotStore.find(context.applicationContext, spec)
+                            ?: slotStore.createSlot(context.applicationContext, spec)
+                        slotName = existing.name; slotSeed = existing.seed; slotProfile = existing.profileId
+                    }
+                } else {
+                    val current = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                        .CloakBrowserTools.slotOf(sid)
+                    val s = if (current.isNullOrBlank()) {
+                        slotStore.defaultSlot(context.applicationContext)
+                    } else {
+                        slotStore.find(context.applicationContext, current)
+                            ?: slotStore.defaultSlot(context.applicationContext)
+                    }
+                    slotName = s.name; slotSeed = s.seed; slotProfile = s.profileId
                 }
-                val fp =
-                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
-                        .CloakFingerprintFactory.build(
-                            seed = seed,
-                            profileId = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
-                                .CloakFingerprintFactory.profileIdFor(seed)
-                        )
 
                 // 切换前先释放旧内核资源，避免两个引擎同时占端口
                 runCatching { session.cloakClient?.close() }
                 session.cloakClient = null
                 session.engine = target
 
-                // 先把指纹写进会话，switchEngine 内部 launch 会读到它
+                // 绑定槽位 + 写入该槽位的指纹，switchEngine 内部 launch 会读到它
                 runCatching {
-                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
-                        .CloakBrowserTools.setFingerprint(sid, fp)
+                    val cloakTools =
+                        com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools
+                    cloakTools.bindSlot(sid, slotName)
+                    cloakTools.setFingerprint(
+                        sid,
+                        com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                            .CloakFingerprintFactory.build(seed = slotSeed, profileId = slotProfile)
+                    )
                 }
 
                 val resultText = bridge.switchEngine(context.applicationContext, sid, target)
-                okCloak(tool, session, "engine:${target.name.lowercase()}", resultText)
+                val slotInfo = "\n--- slot ---\nname=$slotName\nprofile=$slotProfile\n" +
+                    "cookieDir=/root/.operit_cloak/profiles/$slotProfile\n" +
+                    slotStore.describe(context.applicationContext)
+                okCloak(tool, session, "engine:${target.name.lowercase()}", resultText + slotInfo)
             }
 
             else -> error(

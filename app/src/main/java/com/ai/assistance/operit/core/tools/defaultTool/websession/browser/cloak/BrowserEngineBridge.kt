@@ -27,7 +27,7 @@ internal object BrowserEngineBridge {
     fun ensureEngine(context: Context, sessionId: String, engine: BrowserEngine): String {
         when (engine) {
             BrowserEngine.CLOAK -> {
-                val cdp = CloakLauncher.launch(context, currentFingerprint(sessionId))
+                val cdp = CloakLauncher.launch(context, currentFingerprint(context, sessionId))
                 CloakBrowserTools.attach(sessionId, cdp)
                 return "cloak"
             }
@@ -45,7 +45,7 @@ internal object BrowserEngineBridge {
         return when (target) {
             BrowserEngine.CLOAK -> {
                 try {
-                    val cdp = CloakLauncher.launch(context, currentFingerprint(sessionId))
+                    val cdp = CloakLauncher.launch(context, currentFingerprint(context, sessionId))
                     CloakBrowserTools.attach(sessionId, cdp)
                     val st = CloakLauncher.status()
                     buildString {
@@ -190,24 +190,42 @@ internal object BrowserEngineBridge {
 
     // ---------------------------------------------------------------- 内部
 
-    private fun currentFingerprint(sessionId: String): CloakFingerprint {
+    /**
+     * 取当前会话应使用的指纹。
+     *
+     * [IDENTITY-SLOT] 2026-11-01 第二次修正（重要）：
+     *
+     * 上一版用 `"session:$sessionId"` 作种子派生 profileId，是个**严重设计错误**：
+     * sessionId 是 `UUID.randomUUID()`，每次开 App 都不同，于是
+     *   · profileId 每次变 → Cookie/localStorage 全丢 → 今天登录的号明天要重登
+     *   · 指纹每次变 → 服务端看到「同账号天天换设备」，比不换更可疑
+     *
+     * 现在改为从**持久化槽位表**取身份。槽位不随窗口/会话变化，
+     * 只有用户显式开新槽位时才产生新身份。
+     *
+     * 取值优先级：
+     *   1. 会话里已缓存的指纹（同一次运行内复用，避免重复读盘）
+     *   2. 会话绑定的槽位名 → 查 slots.json
+     *   3. 都没有 → 用 default 槽位（老用户升级后沿用存量身份）
+     */
+    private fun currentFingerprint(context: android.content.Context, sessionId: String): CloakFingerprint {
         CloakBrowserTools.fingerprintOf(sessionId)?.let { return it }
-        // [FINGERPRINT-ROTATION] 2026-11-01：
-        // 原来这里回落成 `CloakFingerprint(profileId = sessionId)` ——
-        // 除 profileId 外全是 data class 默认值（同一 UA、同一 1920x1080、
-        // 同一 Asia/Shanghai、fingerprintSeed 恒为 null）。
-        // 结果每个新会话拿到的指纹一模一样，批量注册等于当场自曝。
-        // 改为：以 sessionId 为种子生成一套自洽指纹并**回写**，
-        // 这样同一会话多次启动仍复现同一身份，不同会话各不相同。
-        val seed = "session:$sessionId"
-        val fp = CloakFingerprintFactory.build(
-            seed = seed,
-            profileId = CloakFingerprintFactory.profileIdFor(seed)
-        )
+
+        val boundSlot = CloakBrowserTools.slotOf(sessionId)
+        val slot = if (boundSlot.isNullOrBlank()) {
+            CloakSlotStore.defaultSlot(context)
+        } else {
+            CloakSlotStore.find(context, boundSlot) ?: CloakSlotStore.defaultSlot(context)
+        }
+        // 把槽位名记到会话上，后续 switch/重启都沿用同一身份
+        runCatching { CloakBrowserTools.bindSlot(sessionId, slot.name) }
+
+        val fp = CloakFingerprintFactory.build(seed = slot.seed, profileId = slot.profileId)
         runCatching { CloakBrowserTools.setFingerprint(sessionId, fp) }
         AppLogger.i(
             TAG,
-            "会话 $sessionId 生成指纹: ${fp.spoofPlatform}/${fp.screenWidth}x${fp.screenHeight} " +
+            "会话 $sessionId 绑定槽位 ${slot.name}: " +
+                "${fp.spoofPlatform}/${fp.screenWidth}x${fp.screenHeight} " +
                 "seed=${fp.fingerprintSeed} profile=${fp.profileId} tz=${fp.timezone}"
         )
         return fp
