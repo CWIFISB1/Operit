@@ -844,7 +844,7 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
 
     // [WHITE-SCREEN-FIX v2] 2026-11-01 真机二次复测定位（决定性证据）：
     // logcat 里 CloakSurface 的「画面流启动」日志从未出现，说明 startLoop 没跑过，
-    // 也就是 UI 压根没进 CloakSurfaceView 分支，仍在走 WebView 分支。
+    // 也就是 UI 压根没进 CloakTextureView 分支，仍在走 WebView 分支。
     //
     // 根因是上一版把判定写成 `isCloak && liveCloak != null`，构成一个不可能满足的条件：
     //   · 引擎标记 CLOAK 时，该会话**根本不存在 WebView**（从没创建过）
@@ -852,8 +852,8 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
     //   · 于是去渲染一个不存在的 WebView → 正文必然整片白
     // 代码里没有任何地方会把 isCloak 改成 false，所以那个「降级」注释是空想。
     //
-    // 正解：只要引擎标记是 CLOAK，就必须用 CloakSurfaceView。
-    // CloakSurfaceView.pullFrame 自身已容错（clientProvider 返回 null 时直接 return，
+    // 正解：只要引擎标记是 CLOAK，就必须用 CloakTextureView。
+    // CloakTextureView.pullFrame 自身已容错（clientProvider 返回 null 时直接 return，
     // 下一轮 FRAME_INTERVAL_MS 再试），所以创建时拿不到客户端完全没关系——
     // 先画白底，客户端就绪后下一帧自动出画面。
     val liveCloak =
@@ -872,7 +872,7 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
         pageTitle = activeSession?.pageTitle.orEmpty(),
         // 单内核：引擎恒为 Cloak；engineReady 反映 CDP 客户端是否已建立，
         // 用于 UI 区分"已连上进程"与"进程还没起来"。
-        // UI 决定用 CloakSurfaceView 还是 WebView 渲染，必须跟真实引擎状态一致：
+        // UI 决定用 CloakTextureView 还是 WebView 渲染，必须跟真实引擎状态一致：
         //  - isCloakEngine：会话标记为 CLOAK，且 CDP 客户端确实已建立
         //  - engineReady：CDP 已连上（实心点）／未连上（空心点，下次导航时拉起）
         // 降级到 WebView 后 isCloak 会变成 false，这里自动跟着切成 WebView 渲染，
@@ -881,7 +881,7 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
         engineReady = liveCloak != null,
         // [WHITE-SCREEN-FIX v2] 只看引擎标记，不再附加 liveCloak != null。
         // CLOAK 会话没有 WebView 可渲染，判 false 只会得到白屏；
-        // CloakSurfaceView 自己会在客户端就绪后自动出帧。
+        // CloakTextureView 自己会在客户端就绪后自动出帧。
         isCloakEngine = activeSession?.isCloak == true,
         currentUrl = activeSession?.currentUrl?.ifBlank { "about:blank" } ?: "about:blank",
         canGoBack = activeSession?.canGoBack == true,

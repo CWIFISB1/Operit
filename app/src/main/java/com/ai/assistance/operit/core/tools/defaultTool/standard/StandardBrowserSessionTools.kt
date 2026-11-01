@@ -389,7 +389,7 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
         // 而 buildBrowserState 用 `session.cloakClient != null` 来判定 isCloakEngine，
         // 于是这个标记恒为 false，UI 永远走 WebView 分支 —— 但该会话根本没建过 WebView，
         // 结果就是顶部显示 Cloak、正文整片白。
-        // 修法：探测成功后把客户端回写到会话字段，UI 才能切到 CloakSurfaceView。
+        // 修法：探测成功后把客户端回写到会话字段，UI 才能切到 CloakTextureView。
         if (!session.isCamoufox) {
             session.cloakClient =
                 com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools

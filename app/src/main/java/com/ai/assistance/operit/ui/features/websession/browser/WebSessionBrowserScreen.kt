@@ -49,7 +49,7 @@ import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.WebSes
 import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.WebSessionPendingDialogState
 import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.WebSessionWebViewHost
 import com.ai.assistance.operit.core.tools.defaultTool.websession.userscript.ui.WebSessionUserscriptUiState
-import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakSurfaceView
+import com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakTextureView
 import java.util.Locale
 
 @Composable
@@ -292,7 +292,7 @@ internal fun WebSessionBrowserScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         // 单内核：画面来源取决于当前会话跑的引擎。
-                        //  - CLOAK   → CloakSurfaceView（CDP 截图流 + 触摸回传，真反检测内核）
+                        //  - CLOAK   → CloakTextureView（CDP 截图流 + 触摸回传，真反检测内核）
                         //  - 其它   → 原 AndroidView + WebView（Cloak 起不来时的兜底渲染）
                         if (browserState.isCloakEngine) {
                             // [CLOAK-VIEW-FIX] 2026-11-01 真机第三次复测：
@@ -304,7 +304,7 @@ internal fun WebSessionBrowserScreen(
                             // clientProvider 始终拿到最新值。
                             AndroidView(
                                 factory = { ctx ->
-                                    CloakSurfaceView(ctx).apply {
+                                    CloakTextureView(ctx).apply {
                                         sessionId = browserState.activeSessionId.orEmpty()
                                         clientProvider = {
                                             val sid = sessionId

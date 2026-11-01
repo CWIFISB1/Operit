@@ -56,7 +56,7 @@ import kotlin.math.min
  *   - 增加首帧/首绘/无客户端三类诊断日志（各只打一次）
  * ==================================================================
  */
-internal class CloakSurfaceView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
+internal class CloakTextureView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
 
     companion object {
         private const val TAG = "CloakSurface"
