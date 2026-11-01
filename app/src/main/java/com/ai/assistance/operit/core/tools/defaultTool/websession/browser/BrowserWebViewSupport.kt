@@ -770,25 +770,62 @@ internal fun StandardBrowserSessionTools.openUrlOnMain(appContext: Context, url:
     if (engine != null &&
         engine != com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngine.WEBVIEW
     ) {
-        val routed = runCatching {
-            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
-                .navigate(appContext, session.id, engine, url)
+        // [ANR-FIX] 2026-11-02 真机实测定位（ANR 堆栈铁证）：
+        //
+        // 本方法由 onNavigate 经 runOnMainSync 调用，也就是**跑在主线程上**。
+        // 而 BrowserEngineBridge.navigate 内部会 ensureEngine → CloakLauncher.launch
+        // → waitPort(30_000)，循环 Thread.sleep(300) 最多 30 秒等端口。
+        // 主线程被卡 30 秒 → Input dispatching timed out → ANR。
+        // 用户看到的现象就是「输入地址回车后闪退」。
+        //
+        // 铁证堆栈（data_app_anr@1793571258386）：
+        //   "main" prio=5 tid=1 Sleeping
+        //     at java.lang.Thread.sleep(Native method)
+        //     at CloakLauncher.waitPort(CloakLauncher.kt:202)
+        //     at CloakLauncher.launch(CloakLauncher.kt:347)
+        //     at BrowserEngineBridge.ensureEngine(BrowserEngineBridge.kt:30)
+        //     at BrowserEngineBridge.navigate(BrowserEngineBridge.kt:114)
+        //     at openUrlOnMain(BrowserWebViewSupport.kt:775)
+        //     at onNavigate(BrowserWebViewSupport.kt:458)
+        //
+        // 修法：主线程只更新 UI 状态，把真正的引擎启动丢到后台线程。
+        // chromium 启动本来就该异步，UI 不该等它。
+        session.currentUrl = url
+        session.pageLoaded = false
+        session.isLoading = true
+        session.hasSslError = false
+        session.lastSnapshot = null
+        updateNavigationState(session)
+        refreshSessionUiOnMain(session.id)
+
+        val sessionId = session.id
+        BackgroundNavExecutor.submit {
+            val routed = runCatching {
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
+                    .navigate(appContext, sessionId, engine, url)
+            }
+            runOnUiThread {
+                val s = sessionById(sessionId)
+                if (s != null) {
+                    if (routed.isSuccess) {
+                        s.currentUrl = url
+                        s.pageLoaded = true
+                        s.isLoading = false
+                        updateNavigationState(s)
+                        refreshSessionUiOnMain(sessionId)
+                    } else {
+                        s.isLoading = false
+                        updateNavigationState(s)
+                        refreshSessionUiOnMain(sessionId)
+                        com.ai.assistance.operit.util.AppLogger.w(
+                            "BrowserNav",
+                            "后台 Cloak 导航失败: ${routed.exceptionOrNull()?.message}"
+                        )
+                    }
+                }
+            }
         }
-        if (routed.isSuccess) {
-            session.currentUrl = url
-            session.pageLoaded = true
-            session.isLoading = false
-            session.hasSslError = false
-            session.lastSnapshot = null
-            updateNavigationState(session)
-            refreshSessionUiOnMain(session.id)
-            return
-        }
-        // 分流失败时记一条，随后仍落到 WebView 路径，保证不至于完全没反应。
-        com.ai.assistance.operit.util.AppLogger.w(
-            "BrowserNav",
-            "UI 导航分流 ${engine.name} 失败，回落 WebView: ${routed.exceptionOrNull()?.message}"
-        )
+        return
     }
 
     if (existingSession != null) {
@@ -799,14 +836,19 @@ internal fun StandardBrowserSessionTools.openUrlOnMain(appContext: Context, url:
         // [UI-NAV-FIX] 新建 Cloak 标签页时 createSessionTabOnMain 只把 URL 交给 WebView，
         // 而 Cloak 会话不渲染 WebView，因此必须单独向 CDP 发一次导航，
         // 否则新标签会停在 about:blank。
-        runCatching {
-            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
-                .navigate(appContext, session.id, engine, url)
-        }.onFailure {
-            com.ai.assistance.operit.util.AppLogger.w(
-                "BrowserNav",
-                "新标签 Cloak 导航失败: ${it.message}"
-            )
+        // [ANR-FIX] 同样必须丢后台：这段也在主线程里，
+        // 新标签页首次导航会触发 engine 启动，阻塞 30 秒即 ANR。
+        val sessionId = session.id
+        BackgroundNavExecutor.submit {
+            runCatching {
+                com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.BrowserEngineBridge
+                    .navigate(appContext, sessionId, engine, url)
+            }.onFailure {
+                com.ai.assistance.operit.util.AppLogger.w(
+                    "BrowserNav",
+                    "新标签 Cloak 导航失败: ${it.message}"
+                )
+            }
         }
     }
     ensureSessionAttachedOnMain(session.id)
@@ -1491,5 +1533,37 @@ internal fun StandardBrowserSessionTools.cleanupWebViewOnMain(webView: WebView) 
         webView.destroy()
     } catch (e: Exception) {
         AppLogger.w(WEBVIEW_SUPPORT_TAG, "Error during WebView cleanup: ${e.message}")
+    }
+}
+
+/**
+ * 浏览器导航专用的后台执行器。
+ *
+ * [ANR-FIX] 2026-11-02：
+ * UI 侧 onNavigate 跑在主线程，而 Cloak 会话的导航会触发
+ * CloakLauncher.launch → waitPort(30_000)，阻塞式等待 chromium 端口。
+ * 30 秒不动主线程就是标准 ANR，用户体感是「输入地址回车后闪退」。
+ *
+ * 用单线程：多标签页同时导航会排队，避免多个 chromium 抢同一端口。
+ * 用 daemon 线程：App 退出时不阻止进程收尾。
+ */
+internal object BackgroundNavExecutor {
+    private val executor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "browser-nav").apply { isDaemon = true }
+        }
+
+    fun submit(block: () -> Unit) {
+        runCatching { executor.execute(block) }
+            .onFailure { AppLogger.w(WEBVIEW_SUPPORT_TAG, "导航任务提交失败: ${it.message}") }
+    }
+}
+
+/** 切回主线程执行（导航完成后刷新 UI 状态）。 */
+internal fun runOnUiThread(block: () -> Unit) {
+    if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+        block()
+    } else {
+        android.os.Handler(android.os.Looper.getMainLooper()).post(block)
     }
 }

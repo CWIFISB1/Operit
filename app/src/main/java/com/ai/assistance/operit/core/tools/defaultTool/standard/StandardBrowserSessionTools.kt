@@ -256,6 +256,7 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                 "browser_handle_dialog" -> browserHandleDialog(tool)
                 "browser_hover" -> browserHover(tool)
                 "browser_switch_engine" -> browserSwitchEngine(tool)
+                "browser_cloak_diag" -> browserCloakDiag(tool)
                 "browser_navigate" -> browserNavigate(tool)
                 "browser_navigate_back" -> browserNavigateBack(tool)
                 "browser_network_requests" -> browserNetworkRequests(tool)
@@ -396,6 +397,44 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                     .clientOf(session.id)
         }
         return true
+    }
+
+    /**
+     * [CLOAK-DIAG] 2026-11-02 新增工具入口。
+     *
+     * 主人明确要求：不要再让 AI 靠翻源码 + 拼命令绕半天才知道
+     * 「指纹能不能换 / Cookie 有没有丢 / 现在什么身份」。
+     * 一次调用直接给结论。
+     */
+    private fun browserCloakDiag(tool: AITool): ToolResult {
+        val action = (param(tool, "action")?.trim()?.lowercase()).orEmpty().ifBlank { "status" }
+        val slotName = param(tool, "slot")?.trim().orEmpty()
+        val session = getSession(null)
+        val sid = session?.id
+        val diag =
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakDiagnostics
+
+        return when (action) {
+            "status" -> ok(tool.name, diag.fullReport(context.applicationContext, sid))
+            "slots" -> ok(tool.name, diag.slots(context.applicationContext))
+            "probe" -> ok(tool.name, diag.liveProbe(sid))
+            "new" -> ok(
+                tool.name,
+                diag.newSlot(context.applicationContext, slotName.ifBlank { null })
+            )
+            "use" -> {
+                if (slotName.isBlank()) error(tool.name, "action=use 需要 slot 参数")
+                else ok(tool.name, diag.useSlot(context.applicationContext, sid, slotName))
+            }
+            "delete" -> {
+                if (slotName.isBlank()) error(tool.name, "action=delete 需要 slot 参数")
+                else ok(tool.name, diag.deleteSlot(context.applicationContext, slotName))
+            }
+            else -> error(
+                tool.name,
+                "unsupported action '$action'; use status / slots / probe / new / use / delete"
+            )
+        }
     }
 
     /**

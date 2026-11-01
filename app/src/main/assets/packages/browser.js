@@ -33,7 +33,18 @@
             "parameters": [
                 { "name": "action", "description": { "zh": "status 查询 / switch 切换 / close 释放，默认 switch。", "en": "status to query, switch to change, close to release. Defaults to switch." }, "type": "string", "required": false },
                 { "name": "engine", "description": { "zh": "cloak、camoufox 或 webview。", "en": "cloak, camoufox or webview." }, "type": "string", "required": false },
-                { "name": "fingerprint", "description": { "zh": "可选指纹种子，数字或任意字符串（自动哈希）。", "en": "Optional fingerprint seed; numeric or any string (hashed automatically)." }, "type": "string", "required": false }
+                { "name": "fingerprint", "description": { "zh": "身份槽位：slot=new 建全新身份；slot=reg001 切到指定槽位；不传则沿用当前槽位。指纹与 Cookie 同生共死。", "en": "Identity slot: slot=new for a fresh identity; slot=reg001 to switch; omit to keep current. Fingerprint and cookies live and die together." }, "type": "string", "required": false }
+            ]
+        },
+        {
+            "name": "cloak_diag",
+            "description": {
+                "zh": "Cloak 内核一站式诊断与身份管理。一次调用看到：引擎状态、当前身份槽位、指纹完整快照（UA/屏幕/GPU/时区/核数/Canvas/WebGL）、WebRTC 泄漏、Cookie 目录体积、自洽性检查。actions: status=full / slots / probe / new / use / delete",
+                "en": "One-stop Cloak diagnostics and identity management: engine status, active slot, full fingerprint snapshot, WebRTC leakage, cookie dir size, self-consistency checks. Actions: status / slots / probe / new / use / delete."
+            },
+            "parameters": [
+                { "name": "action", "description": { "zh": "status=全量诊断(默认) / slots=列槽位 / probe=实测指纹 / new=新建身份 / use=切槽位(需slot) / delete=删槽位(需slot)", "en": "status(default) / slots / probe / new / use(needs slot) / delete(needs slot)" }, "type": "string", "required": false },
+                { "name": "slot", "description": { "zh": "槽位名，如 reg001、default。use 和 delete 必填。", "en": "Slot name, e.g. reg001 or default. Required for use/delete." }, "type": "string", "required": false }
             ]
         },
         {
@@ -209,6 +220,7 @@ const TOOL_NAMES = [
     "select_option",
     "snapshot",
     "switch_engine",
+    "cloak_diag",
     "type",
     "wait_for",
     "tabs"
