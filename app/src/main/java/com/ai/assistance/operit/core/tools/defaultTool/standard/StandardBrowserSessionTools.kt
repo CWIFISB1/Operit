@@ -496,10 +496,35 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                     return error(tool.name, "没有活动会话，先调用 browser_navigate 建一个")
                 }
                 val sid = session.id
+
+                // [FINGERPRINT-ROTATION] 2026-11-01 新增：
+                // 工具声明里一直有 fingerprint 参数，但代码从来没读过它（全仓 0 处引用），
+                // 传了等于没传，每次切换引擎拿到的都是同一套默认指纹。
+                // 现在按参数生成指纹：显式传种子则确定性复现，不传则每次随机一套新的。
+                val seedParam = param(tool, "fingerprint")?.trim().orEmpty()
+                val seed = seedParam.ifBlank {
+                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                        .CloakFingerprintFactory.randomSeed()
+                }
+                val fp =
+                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                        .CloakFingerprintFactory.build(
+                            seed = seed,
+                            profileId = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                                .CloakFingerprintFactory.profileIdFor(seed)
+                        )
+
                 // 切换前先释放旧内核资源，避免两个引擎同时占端口
                 runCatching { session.cloakClient?.close() }
                 session.cloakClient = null
                 session.engine = target
+
+                // 先把指纹写进会话，switchEngine 内部 launch 会读到它
+                runCatching {
+                    com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                        .CloakBrowserTools.setFingerprint(sid, fp)
+                }
+
                 val resultText = bridge.switchEngine(context.applicationContext, sid, target)
                 okCloak(tool, session, "engine:${target.name.lowercase()}", resultText)
             }

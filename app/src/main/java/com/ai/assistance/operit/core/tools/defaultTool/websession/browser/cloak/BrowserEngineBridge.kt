@@ -190,8 +190,28 @@ internal object BrowserEngineBridge {
 
     // ---------------------------------------------------------------- 内部
 
-    private fun currentFingerprint(sessionId: String): CloakFingerprint =
-        CloakBrowserTools.fingerprintOf(sessionId) ?: CloakFingerprint(profileId = sessionId)
+    private fun currentFingerprint(sessionId: String): CloakFingerprint {
+        CloakBrowserTools.fingerprintOf(sessionId)?.let { return it }
+        // [FINGERPRINT-ROTATION] 2026-11-01：
+        // 原来这里回落成 `CloakFingerprint(profileId = sessionId)` ——
+        // 除 profileId 外全是 data class 默认值（同一 UA、同一 1920x1080、
+        // 同一 Asia/Shanghai、fingerprintSeed 恒为 null）。
+        // 结果每个新会话拿到的指纹一模一样，批量注册等于当场自曝。
+        // 改为：以 sessionId 为种子生成一套自洽指纹并**回写**，
+        // 这样同一会话多次启动仍复现同一身份，不同会话各不相同。
+        val seed = "session:$sessionId"
+        val fp = CloakFingerprintFactory.build(
+            seed = seed,
+            profileId = CloakFingerprintFactory.profileIdFor(seed)
+        )
+        runCatching { CloakBrowserTools.setFingerprint(sessionId, fp) }
+        AppLogger.i(
+            TAG,
+            "会话 $sessionId 生成指纹: ${fp.spoofPlatform}/${fp.screenWidth}x${fp.screenHeight} " +
+                "seed=${fp.fingerprintSeed} profile=${fp.profileId} tz=${fp.timezone}"
+        )
+        return fp
+    }
 
     /** Camoufox 的指纹，缺省按 sessionId 生成一个 Windows persona。 */
     private fun currentCamoufoxFingerprint(sessionId: String): CamoufoxFingerprint =

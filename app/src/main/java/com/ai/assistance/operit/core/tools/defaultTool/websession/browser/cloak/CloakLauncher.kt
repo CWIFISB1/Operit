@@ -52,6 +52,8 @@ internal object CloakLauncher {
     @Volatile private var hasXvfb: Boolean? = null
     @Volatile private var headlessForced: Boolean = false
     @Volatile private var current: CloakStatus = CloakStatus()
+    /** 上一次实际生效的指纹签名，用于判断是否需要重启浏览器。 */
+    @Volatile private var lastFingerprintKey: String = ""
     private var client: CloakCdpClient? = null
     private val launching = AtomicBoolean(false)
 
@@ -210,8 +212,20 @@ internal object CloakLauncher {
      * 已启动则直接复用。
      */
     fun launch(context: Context, fingerprint: CloakFingerprint): CloakCdpClient {
-        // 已有连接直接复用
-        client?.let { if (current.running) return it }
+        // [FINGERPRINT-ROTATION] 2026-11-01 修复：
+        // 原逻辑「已有连接直接复用」导致换指纹完全不生效 ——
+        // 调用方传了新 fingerprint，这里却因为 current.running 为 true 直接返回旧 client，
+        // 新参数被静默丢弃。批量注册场景下每个账号拿到的还是同一套指纹。
+        // 修法：记录上次生效的指纹签名，签名不一致时先 shutdown 再重新拉起。
+        client?.let {
+            if (current.running && lastFingerprintKey == fingerprintKey(fingerprint)) {
+                return it
+            }
+            if (current.running) {
+                AppLogger.i(TAG, "指纹变更，重启 CloakBrowser: $lastFingerprintKey -> ${fingerprintKey(fingerprint)}")
+                runCatching { shutdown(context, stopXvfb = false) }
+            }
+        }
 
         if (!launching.compareAndSet(false, true)) {
             // 另一个线程正在启动，等它完成
@@ -325,6 +339,7 @@ internal object CloakLauncher {
 
             if (!waitPort(port, 35_000)) {
                 val log = proot(context, "tail -40 $logFile 2>/dev/null", 15_000L)
+                lastFingerprintKey = fingerprintKey(fingerprint)
                 current = CloakStatus(
                     running = false, port = port, pid = pid,
                     profileId = fingerprint.profileId,
@@ -383,6 +398,35 @@ internal object CloakLauncher {
         proot(context, "$chrome --version 2>/dev/null", 20_000L)?.trim()?.take(80) ?: "unknown"
 
     // ------------------------------------------------------------------ 停止
+
+    /**
+     * 指纹签名：把会影响「进程内已固化」的字段串成一个可比较的 key。
+     *
+     * 为什么需要它：Chromium 的 Canvas / WebGL / 字体 / UA / 屏幕这些项
+     * 是在进程启动时由命令行参数与 --fingerprint 种子一次性固化的，
+     * 运行期用 CDP 改只能改一部分（UA、时区、视口），改不了 Canvas 与字体。
+     * 所以指纹一变，必须重启进程，不能就地改。
+     */
+    private fun fingerprintKey(f: CloakFingerprint): String =
+        buildString {
+            append(f.profileId).append('|')
+            append(f.fingerprintSeed ?: -1).append('|')
+            append(f.userAgent).append('|')
+            append(f.platform).append('|')
+            append(f.timezone).append('|')
+            append(f.language).append('|')
+            append(f.viewportWidth).append('x').append(f.viewportHeight).append('|')
+            append(f.screenWidth ?: 0).append('x').append(f.screenHeight ?: 0).append('|')
+            append(f.deviceScale).append('|')
+            append(f.mobile).append('|')
+            append(f.spoofPlatform).append('|')
+            append(f.gpuVendor ?: "").append('|')
+            append(f.hardwareConcurrency ?: 0).append('|')
+            append(f.deviceMemory ?: 0).append('|')
+            append(f.proxyServer ?: "").append('|')
+            append(f.webrtcIp).append('|')
+            append(f.webrtcMode)
+        }
 
     fun shutdown() {
         runCatching { client?.close() }
