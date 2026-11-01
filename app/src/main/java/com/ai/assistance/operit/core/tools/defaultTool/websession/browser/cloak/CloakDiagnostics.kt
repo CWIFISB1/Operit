@@ -378,7 +378,7 @@ new Promise((res)=>{
             append("机房 IP : ").append(if (geo.isHosting) "是 ⚠️" else "否").append('\n')
             append("代理标记: ").append(if (geo.isProxy) "是 ⚠️" else "否").append('\n')
             append("移动网络: ").append(if (geo.isMobile) "是" else "否").append('\n')
-            append('\n质量判定: ').append(geo.riskNote()).append('\n')
+            append("\n质量判定: ").append(geo.riskNote()).append('\n')
             append("\n绑定后指纹将自动设为：\n")
             append("  时区 ").append(geo.timezone).append('\n')
             append("  语言 ").append(CloakGeoResolver.languageFor(geo.countryCode)).append('\n')

@@ -344,8 +344,6 @@ internal object CloakNodeRunner {
         root.put("outbounds", org.json.JSONArray().put(outbound))
         return root.toString()
     }
-        val dir = "$WORK_ROOT/$slotName"
-        val cfg = "$dir/config.yaml"
 
 
 
