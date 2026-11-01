@@ -9,11 +9,11 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.SurfaceTexture
 import android.os.Handler
 import android.os.Looper
 import android.view.MotionEvent
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.TextureView
 import com.ai.assistance.operit.util.AppLogger
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -31,8 +31,21 @@ import kotlin.math.min
  * 分工：
  *  - 本类只负责「把远端画面画出来」和「把本地手指动作翻译成 CDP 输入事件」。
  *  - 浏览器语义（导航、快照、工具调用）仍走 CloakBrowserTools / BrowserEngineBridge。
+ *
+ * [TEXTUREVIEW-FIX] 2026-11-01 真机第三次复测：
+ * 原来继承 SurfaceView，日志已出现「Cloak 画面流启动」，说明 surfaceCreated 正常、
+ * 抓帧线程也在跑，但用户看到的仍是一片白。
+ * 根因是 SurfaceView 的图层语义：它由 SurfaceFlinger 单独合成在应用窗口之下，
+ * 默认 ZOrder 在 View 树底部。Compose 的 AndroidView 外层 Box 铺了不透明背景
+ * （MaterialTheme.colorScheme.background），于是把 SurfaceView 整个盖住了 ——
+ * 画面在画，但被遮住看不见。
+ * 常规解法是 setZOrderOnTop(true)，但那会把 SurfaceView 顶到所有 UI 之上，
+ * 连地址栏、工具栏都会被盖住，还得手工处理透明与层级，非常脆。
+ * 改继承 TextureView：它作为普通 View 参与 View 树的正常合成，
+ * 不存在图层穿透问题，也不需要任何 ZOrder 技巧。
+ * 代价是多一次 GPU 拷贝，对 15fps 截图流完全可以接受。
  */
-internal class CloakSurfaceView(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+internal class CloakSurfaceView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
 
     companion object {
         private const val TAG = "CloakSurface"
@@ -52,7 +65,7 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
     /**
      * 抓帧线程池。
      *
-     * 必须可重建：SurfaceView 的 surface 会随页面切换 / 息屏 / 返回被销毁再创建，
+     * 必须可重建：TextureView 的 surface 会随页面切换 / 息屏 / 返回被销毁再创建，
      * 而 shutdown 过的 executor 不能再提交任务，重建是唯一安全做法。
      */
     @Volatile private var frameThread: ScheduledExecutorService? = null
@@ -67,6 +80,11 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
     @Volatile private var lastError: String? = null
     @Volatile private var attached = false
 
+    /** 诊断用：确认「抓到了帧」和「画上去了」各发生过一次，不刷屏。 */
+    @Volatile private var loggedFirstFrame = false
+    @Volatile private var loggedFirstDraw = false
+    @Volatile private var loggedNoClient = false
+
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
     private val destRect = RectF()
     private val srcRect = Rect()
@@ -76,25 +94,32 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
     private var moved = false
 
     init {
-        holder.addCallback(this)
-        holder.setFormat(android.graphics.PixelFormat.OPAQUE)
+        surfaceTextureListener = this
+        // TextureView 默认不透明即可；这里显式置白，未出帧时是白底而不是黑底。
+        isOpaque = true
+        setBackgroundColor(Color.WHITE)
     }
 
     // ---------------------------------------------------------------- 生命周期
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
         attached = true
+        AppLogger.i(TAG, "TextureView surface 就绪 ${width}x$height session=$sessionId")
         startLoop()
     }
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        AppLogger.i(TAG, "TextureView 尺寸变化 ${width}x$height")
         redraw()
     }
 
-    override fun surfaceDestroyed(holder: SurfaceHolder) {
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
         attached = false
         stopLoop()
+        return true
     }
+
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
 
     fun startLoop() {
         if (!running.compareAndSet(false, true)) return
@@ -134,7 +159,16 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
 
     private fun pullFrame() {
         if (!running.get() || inputBusy.get()) return
-        val client = clientProvider?.invoke() ?: return
+        val client = clientProvider?.invoke()
+        if (client == null) {
+            // 只记一次：客户端还没绑定时这条每 66ms 都会命中，刷屏没意义。
+            if (!loggedNoClient) {
+                loggedNoClient = true
+                AppLogger.w(TAG, "抓帧跳过：clientProvider 返回 null，session=$sessionId")
+            }
+            return
+        }
+        loggedNoClient = false
         try {
             val png = client.screenshot()
             if (png.isEmpty()) return
@@ -143,6 +177,10 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
             val bmp = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return
             lastFrameHash = hash
             lastError = null
+            if (!loggedFirstFrame) {
+                loggedFirstFrame = true
+                AppLogger.i(TAG, "首帧抓取成功 ${bmp.width}x${bmp.height} bytes=${png.size}")
+            }
             val old = frame
             frame = bmp
             // 旧帧必须回收，否则 15fps 下几秒就把堆打满（1280x800 单帧约 4MB）。
@@ -160,12 +198,11 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
 
     private fun redraw() {
         if (!attached) return
-        val surfaceHolder = holder
-        if (surfaceHolder.surface?.isValid != true) return
+        if (!isAvailable) return
+        val bmp = frame
         var canvas: Canvas? = null
         try {
-            canvas = surfaceHolder.lockCanvas() ?: return
-            val bmp = frame
+            canvas = lockCanvas() ?: return
             if (bmp == null || bmp.isRecycled) {
                 canvas.drawColor(Color.WHITE)
                 return
@@ -174,11 +211,15 @@ internal class CloakSurfaceView(context: Context) : SurfaceView(context), Surfac
             canvas.drawColor(Color.WHITE)
             srcRect.set(0, 0, bmp.width, bmp.height)
             canvas.drawBitmap(bmp, srcRect, destRect, paint)
+            if (!loggedFirstDraw) {
+                loggedFirstDraw = true
+                AppLogger.i(TAG, "首帧绘制完成 canvas=${canvas.width}x${canvas.height} dest=$destRect")
+            }
         } catch (t: Throwable) {
             AppLogger.w(TAG, "绘制失败: ${t.message}")
         } finally {
             if (canvas != null) {
-                runCatching { surfaceHolder.unlockCanvasAndPost(canvas) }
+                runCatching { unlockCanvasAndPost(canvas) }
             }
         }
     }

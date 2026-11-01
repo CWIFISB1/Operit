@@ -294,13 +294,20 @@ internal fun WebSessionBrowserScreen(
                         //  - CLOAK   → CloakSurfaceView（CDP 截图流 + 触摸回传，真反检测内核）
                         //  - 其它   → 原 AndroidView + WebView（Cloak 起不来时的兜底渲染）
                         if (browserState.isCloakEngine) {
+                            // [CLOAK-VIEW-FIX] 2026-11-01 真机第三次复测：
+                            // 原实现把 browserState.activeSessionId 闭包捕获进 clientProvider，
+                            // 而 factory 只在首次组合时执行一次。若那时 activeSessionId 还没就绪
+                            // （常见：面板先于导航创建），闭包会一直返回 null，
+                            // 抓帧线程每 66ms 命中一次 null 然后 return —— 画面永远不出来。
+                            // 改为读 view 自身的 sessionId 字段，update 每次重组都会刷新它，
+                            // clientProvider 始终拿到最新值。
                             AndroidView(
                                 factory = { ctx ->
                                     CloakSurfaceView(ctx).apply {
                                         sessionId = browserState.activeSessionId.orEmpty()
                                         clientProvider = {
-                                            val sid = browserState.activeSessionId
-                                            if (sid == null) null
+                                            val sid = sessionId
+                                            if (sid.isEmpty()) null
                                             else com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.clientOf(sid)
                                         }
                                         setBackgroundColor(AndroidColor.WHITE)
@@ -308,11 +315,7 @@ internal fun WebSessionBrowserScreen(
                                 },
                                 update = { view ->
                                     view.sessionId = browserState.activeSessionId.orEmpty()
-                                    view.clientProvider = {
-                                        val sid = browserState.activeSessionId
-                                        if (sid == null) null
-                                        else com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.clientOf(sid)
-                                    }
+                                    // clientProvider 在 factory 里已绑定到 view 自身字段，无需重建。
                                 },
                                 modifier = Modifier.fillMaxSize()
                             )
