@@ -626,13 +626,45 @@ internal class CloakCdpClient(
      * 让 onLine 变 true。这里顺手把延迟/带宽设成常见宽带值，
      * 避免出现「0ms 延迟」这种 unrealistically perfect 的组合。
      */
+    /**
+     * 修正 navigator.onLine。
+     *
+     * [ONLINE-FIX] 2026-11-01 真机复测（Cloak Chromium 146 + Android 16）：
+     * 原实现用 Network.emulateNetworkConditions(offline=false)，
+     * 但实测 navigator.onLine 仍为 **false**。原因：该命令只影响网络栈的
+     * 请求拦截层，不覆盖 navigator.onLine 的取值源；新版本 Chromium 里
+     * 它已被 Network.overrideNetworkState 取代。
+     *
+     * 正确 API：Network.overrideNetworkState，它显式提供 connectionType
+     * 与 offline 字段，直接决定 navigator.onLine 的返回值。
+     *
+     * 两者都发：先 overrideNetworkState（主），再 emulateNetworkConditions
+     * （兜底，兼容旧 CDP 实现）。任一失败都不抛出，避免影响启动。
+     */
     fun setOnline(online: Boolean = true) {
-        call("Network.emulateNetworkConditions", JSONObject().apply {
-            put("offline", !online)
-            put("latency", 20)              // 20ms，接近正常宽带 RTT
-            put("downloadThroughput", -1)   // -1 = 不限速
-            put("uploadThroughput", -1)
-        })
+        // 主路径：Network.overrideNetworkState
+        runCatching {
+            call("Network.overrideNetworkState", JSONObject().apply {
+                put("offline", !online)
+                put("latency", 20)                 // 20ms，接近正常宽带 RTT
+                put("downloadThroughput", -1)      // -1 = 不限速
+                put("uploadThroughput", -1)
+                put("connectionType", "wifi")      // 影响 navigator.connection.effectiveType
+            })
+        }.onFailure {
+            AppLogger.w("CloakCdp", "overrideNetworkState 失败: ${it.message}")
+        }
+        // 兜底：旧接口，部分 CDP 实现仍需要它才放行网络
+        runCatching {
+            call("Network.emulateNetworkConditions", JSONObject().apply {
+                put("offline", !online)
+                put("latency", 20)
+                put("downloadThroughput", -1)
+                put("uploadThroughput", -1)
+            })
+        }.onFailure {
+            AppLogger.w("CloakCdp", "emulateNetworkConditions 失败: ${it.message}")
+        }
     }
 
     fun enableNetwork(onRequest: ((JSONObject) -> Unit)? = null, onResponse: ((JSONObject) -> Unit)? = null) {
