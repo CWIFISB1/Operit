@@ -19,10 +19,26 @@ private const val CONTENT_CHUNK_CHARACTER_COUNT = 65_536
  * 这里设一个硬预算：预算内的消息完整还原，预算耗尽后的消息只保留已读到
  * 的部分（至少保证首块可显示），宁可截断也不崩。
  */
-private const val MAX_MATERIALIZE_CHARS = 6_000_000
+private const val MAX_MATERIALIZE_CHARS = 3_000_000
 
-/** 预算耗尽后，剩余消息最多保留的字符数（首块）。 */
-private const val MATERIALIZE_FALLBACK_CHARS = CONTENT_CHUNK_CHARACTER_COUNT
+/**
+ * 单次查询最多返回的消息行数。
+ *
+ * 为什么需要：每行的 content 已被 SUBSTR 截断到 65536 字符，但行数没有上限。
+ * 一个 607MB 的库里可能有几千条长消息，纯 List 装载就要上百 MB，直接 OOM。
+ * 8000 行 * 64K 字符（UTF-16 双字节）= 最坏 ~1GB 仍然过大，所以配套把
+ * 单行首块也考虑进来：实际绝大多数行远小于 64K，8000 是安全经验值。
+ */
+private const val MAX_ROWS_PER_QUERY = 8_000
+
+/**
+ * 预算耗尽后，剩余消息最多保留的字符数。
+ *
+ * 为什么不能沿用 64K：一段会话可能有上千条消息，若每条都留 64K，
+ * 仅兜底就要 1000 * 65536 * 2 字节 ≈ 128MB，照样 OOM。
+ * 500 字符足够 UI 显示「这条有内容 + 开头一行」，总量可控。
+ */
+private const val MATERIALIZE_FALLBACK_CHARS = 500
 
 private const val MESSAGE_CONTENT_ROW_QUERY =
     """
@@ -90,12 +106,13 @@ data class ChatContentCharacterCount(
 /** Reads message text in bounded rows so a single large message cannot overflow CursorWindow. */
 @Dao
 abstract class ChatContentDao {
-    @Query(MESSAGE_CONTENT_ROW_QUERY + " WHERE chatId = :chatId ORDER BY timestamp ASC")
+    @Query(MESSAGE_CONTENT_ROW_QUERY + " WHERE chatId = :chatId ORDER BY timestamp ASC LIMIT $MAX_ROWS_PER_QUERY")
     protected abstract suspend fun queryMessagesForChat(chatId: String): List<MessageContentRow>
 
     @Query(
         MESSAGE_CONTENT_ROW_QUERY +
-            " WHERE chatId = :chatId AND timestamp >= :startTimestampInclusive ORDER BY timestamp ASC"
+            " WHERE chatId = :chatId AND timestamp >= :startTimestampInclusive" +
+            " ORDER BY timestamp ASC LIMIT $MAX_ROWS_PER_QUERY"
     )
     protected abstract suspend fun queryMessagesForChatFromTimestampAsc(
         chatId: String,
@@ -457,11 +474,20 @@ abstract class ChatContentDao {
         }
 
         // 本次允许还原到的字符位置上限
-        val allowedChars: Long = when {
-            budget <= 0 -> MATERIALIZE_FALLBACK_CHARS.toLong()
-            budget.toLong() >= totalChars -> totalChars
-            else -> budget.toLong().coerceAtLeast(MATERIALIZE_FALLBACK_CHARS.toLong())
+        // 预算耗尽：直接只留开头，不再逐块读库
+        if (budget <= 0) {
+            val head = row.message.content
+            val cut = if (head.length > MATERIALIZE_FALLBACK_CHARS) {
+                head.substring(0, MATERIALIZE_FALLBACK_CHARS)
+            } else {
+                head
+            }
+            out.add(row.message.copy(content = cut))
+            return cut.length
         }
+
+        val allowedChars: Long =
+            if (budget.toLong() >= totalChars) totalChars else budget.toLong()
 
         val content = StringBuilder(row.message.content)
         var startCharacter = CONTENT_CHUNK_CHARACTER_COUNT.toLong() + 1L
@@ -507,11 +533,19 @@ abstract class ChatContentDao {
             return row.variant.content.length
         }
 
-        val allowedChars: Long = when {
-            budget <= 0 -> MATERIALIZE_FALLBACK_CHARS.toLong()
-            budget.toLong() >= totalChars -> totalChars
-            else -> budget.toLong().coerceAtLeast(MATERIALIZE_FALLBACK_CHARS.toLong())
+        if (budget <= 0) {
+            val head = row.variant.content
+            val cut = if (head.length > MATERIALIZE_FALLBACK_CHARS) {
+                head.substring(0, MATERIALIZE_FALLBACK_CHARS)
+            } else {
+                head
+            }
+            out.add(row.variant.copy(content = cut))
+            return cut.length
         }
+
+        val allowedChars: Long =
+            if (budget.toLong() >= totalChars) totalChars else budget.toLong()
 
         val content = StringBuilder(row.variant.content)
         var startCharacter = CONTENT_CHUNK_CHARACTER_COUNT.toLong() + 1L
