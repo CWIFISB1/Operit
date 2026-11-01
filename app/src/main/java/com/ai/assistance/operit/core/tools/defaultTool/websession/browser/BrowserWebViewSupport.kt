@@ -842,13 +842,20 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
     val activeSession = activeId?.let(::sessionById)
     val orderedIds = registry.orderedSessionIds
 
-    // [WHITE-SCREEN-FIX] 2026-11-01 真机复测定位：
-    // 旧判定 isCloakEngine = isCloak && session.cloakClient != null 恒为 false，
-    // 因为 cloakClient 全仓从未被赋过非 null 值（ensureEngine 只写进
-    // CloakBrowserTools.sessions 这张运行时表，没回写会话字段）。
-    // 结果 UI 永远走 WebView 分支，而该会话根本没建 WebView → 正文整片白，
-    // 但顶部芯片仍显示 Cloak。
-    // 这里改为「会话字段优先，运行时表兜底」的实时探测，直接修正判定。
+    // [WHITE-SCREEN-FIX v2] 2026-11-01 真机二次复测定位（决定性证据）：
+    // logcat 里 CloakSurface 的「画面流启动」日志从未出现，说明 startLoop 没跑过，
+    // 也就是 UI 压根没进 CloakSurfaceView 分支，仍在走 WebView 分支。
+    //
+    // 根因是上一版把判定写成 `isCloak && liveCloak != null`，构成一个不可能满足的条件：
+    //   · 引擎标记 CLOAK 时，该会话**根本不存在 WebView**（从没创建过）
+    //   · liveCloak 为 null（客户端尚未建好）时，判定为 false → 走 WebView 分支
+    //   · 于是去渲染一个不存在的 WebView → 正文必然整片白
+    // 代码里没有任何地方会把 isCloak 改成 false，所以那个「降级」注释是空想。
+    //
+    // 正解：只要引擎标记是 CLOAK，就必须用 CloakSurfaceView。
+    // CloakSurfaceView.pullFrame 自身已容错（clientProvider 返回 null 时直接 return，
+    // 下一轮 FRAME_INTERVAL_MS 再试），所以创建时拿不到客户端完全没关系——
+    // 先画白底，客户端就绪后下一帧自动出画面。
     val liveCloak =
         runCatching {
             if (activeSession == null || !activeSession.isCloak || activeSession.isCamoufox) {
@@ -872,7 +879,10 @@ internal fun StandardBrowserSessionTools.buildBrowserState(
         // 不会出现「UI 还在等 Cloak 画面、实际 WebView 已经在跑」的黑屏。
         engineLabel = if (activeSession?.isCloak == true) "Cloak" else "WebView",
         engineReady = liveCloak != null,
-        isCloakEngine = activeSession?.isCloak == true && liveCloak != null,
+        // [WHITE-SCREEN-FIX v2] 只看引擎标记，不再附加 liveCloak != null。
+        // CLOAK 会话没有 WebView 可渲染，判 false 只会得到白屏；
+        // CloakSurfaceView 自己会在客户端就绪后自动出帧。
+        isCloakEngine = activeSession?.isCloak == true,
         currentUrl = activeSession?.currentUrl?.ifBlank { "about:blank" } ?: "about:blank",
         canGoBack = activeSession?.canGoBack == true,
         canGoForward = activeSession?.canGoForward == true,
