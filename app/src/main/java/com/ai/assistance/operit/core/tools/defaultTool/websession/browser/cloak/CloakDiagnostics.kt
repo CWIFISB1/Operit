@@ -103,7 +103,7 @@ new Promise((res)=>{
         sb.append("pid       : ").append(st.pid).append('\n')
         sb.append("version   : ").append(st.version.ifBlank { "-" }).append('\n')
         sb.append("environment: ").append(CloakLauncher.environmentSummary(context)).append('\n')
-        if (st.lastError.isNotBlank()) sb.append("lastError : ").append(st.lastError).append('\n')
+        if (!st.lastError.isNullOrBlank()) sb.append("lastError : ").append(st.lastError).append('\n')
 
         // ---------- 2. 身份槽位 ----------
         sb.append("\n===== 2. 身份 =====\n")
@@ -250,7 +250,7 @@ new Promise((res)=>{
         val sb = StringBuilder()
 
         sb.append("===== 实测指纹（页面内真实值）=====\n")
-        val raw = runCatching { client.evaluate(PROBE_JS) }.getOrNull()
+        val raw: String? = runCatching { client.evaluate(PROBE_JS)?.toString() }.getOrNull()
         if (raw.isNullOrBlank()) {
             sb.append("evaluate 失败\n")
         } else {
@@ -277,7 +277,7 @@ new Promise((res)=>{
         }
 
         sb.append("\n===== WebRTC 泄漏 =====\n")
-        val wr = runCatching { client.evaluate(WEBRTC_JS) }.getOrNull()
+        val wr: String? = runCatching { client.evaluate(WEBRTC_JS)?.toString() }.getOrNull()
         if (wr.isNullOrBlank()) {
             sb.append("探测失败\n")
         } else {
