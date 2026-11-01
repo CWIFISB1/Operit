@@ -33,7 +33,8 @@
             "parameters": [
                 { "name": "action", "description": { "zh": "status 查询 / switch 切换 / close 释放，默认 switch。", "en": "status to query, switch to change, close to release. Defaults to switch." }, "type": "string", "required": false },
                 { "name": "engine", "description": { "zh": "cloak、camoufox 或 webview。", "en": "cloak, camoufox or webview." }, "type": "string", "required": false },
-                { "name": "fingerprint", "description": { "zh": "身份槽位：slot=new 建全新身份；slot=reg001 切到指定槽位；不传则沿用当前槽位。指纹与 Cookie 同生共死。", "en": "Identity slot: slot=new for a fresh identity; slot=reg001 to switch; omit to keep current. Fingerprint and cookies live and die together." }, "type": "string", "required": false }
+                { "name": "fingerprint", "description": { "zh": "身份槽位：slot=new 建全新身份；slot=reg001 切到指定槽位；不传则沿用当前槽位。指纹与 Cookie 同生共死。", "en": "Identity slot: slot=new for a fresh identity; slot=reg001 to switch; omit to keep current." }, "type": "string", "required": false },
+                { "name": "proxy", "description": { "zh": "可选代理，建新槽位时绑定到该身份。格式：socks5://user:pass@host:port 或 http://host:port。传入后会自动反查出口 IP 归属，并用它覆盖指纹的时区与语言，保证 IP/时区/语言三者同源。如果代理随时换，每次都带 proxy=slot=new 开新身份，不要在旧槽位上改代理（那等于让一个账号瞬移）。", "en": "Optional proxy bound to the new slot. Format: socks5://user:pass@host:port or http://host:port. Its exit IP is resolved and used to override the fingerprint timezone/language so IP, timezone and language stay consistent." }, "type": "string", "required": false }
             ]
         },
         {
@@ -43,8 +44,9 @@
                 "en": "One-stop Cloak diagnostics and identity management: engine status, active slot, full fingerprint snapshot, WebRTC leakage, cookie dir size, self-consistency checks. Actions: status / slots / probe / new / use / delete."
             },
             "parameters": [
-                { "name": "action", "description": { "zh": "status=全量诊断(默认) / slots=列槽位 / probe=实测指纹 / new=新建身份 / use=切槽位(需slot) / delete=删槽位(需slot)", "en": "status(default) / slots / probe / new / use(needs slot) / delete(needs slot)" }, "type": "string", "required": false },
-                { "name": "slot", "description": { "zh": "槽位名，如 reg001、default。use 和 delete 必填。", "en": "Slot name, e.g. reg001 or default. Required for use/delete." }, "type": "string", "required": false }
+                { "name": "action", "description": { "zh": "status=全量诊断(默认) / slots=列槽位 / probe=实测指纹 / new=新建身份 / use=切槽位(需slot) / delete=删槽位(需slot) / proxytest=测代理出口与风险(需proxy)", "en": "status(default) / slots / probe / new / use(needs slot) / delete(needs slot)" }, "type": "string", "required": false },
+                { "name": "slot", "description": { "zh": "槽位名，如 reg001、default。use 和 delete 必填。", "en": "Slot name, e.g. reg001 or default. Required for use/delete." }, "type": "string", "required": false },
+                { "name": "proxy", "description": { "zh": "action=proxytest 时要测试的代理；action=new 时绑定到新槽位。", "en": "Proxy to test (proxytest) or to bind to the new slot (new)." }, "type": "string", "required": false }
             ]
         },
         {

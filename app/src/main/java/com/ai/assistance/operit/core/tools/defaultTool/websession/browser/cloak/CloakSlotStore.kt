@@ -78,7 +78,19 @@ internal object CloakSlotStore {
         val seed: String,
         val profileId: String,
         val createdAt: Long = System.currentTimeMillis(),
-        val note: String = ""
+        val note: String = "",
+        /**
+         * 该身份绑定的固定代理。空 = 直连（用设备真实出口）。
+         *
+         * [GEO-SYNC] 代理必须绑在槽位上：同一账号今天走首尔、明天走巴黎，
+         * 风控立刻标记「IP 跳变」。身份 = 指纹 + Cookie + 固定出口 IP，三者同生共死。
+         * 主人说代理随时换 —— 那就**新建槽位**，不要在旧槽位上改代理。
+         */
+        val proxy: String = "",
+        /** 上次探测到的出口 IP，仅作记录与诊断展示。 */
+        val exitIp: String = "",
+        /** 出口 IP 对应时区，用于和指纹时区做一致性校验。 */
+        val exitTz: String = ""
     ) {
         fun toJson(): JSONObject = JSONObject().apply {
             put("name", name)
@@ -86,6 +98,9 @@ internal object CloakSlotStore {
             put("profileId", profileId)
             put("createdAt", createdAt)
             put("note", note)
+            put("proxy", proxy)
+            put("exitIp", exitIp)
+            put("exitTz", exitTz)
         }
 
         companion object {
@@ -94,7 +109,10 @@ internal object CloakSlotStore {
                 seed = o.optString("seed"),
                 profileId = o.optString("profileId"),
                 createdAt = o.optLong("createdAt", System.currentTimeMillis()),
-                note = o.optString("note", "")
+                note = o.optString("note", ""),
+                proxy = o.optString("proxy", ""),
+                exitIp = o.optString("exitIp", ""),
+                exitTz = o.optString("exitTz", "")
             )
         }
     }
@@ -172,23 +190,39 @@ internal object CloakSlotStore {
      *
      * @param name 不传则自动生成 `reg001` 这种递增名。
      */
-    fun createSlot(context: android.content.Context, name: String? = null): Slot {
+    fun createSlot(
+        context: android.content.Context,
+        name: String? = null,
+        proxy: String = ""
+    ): Slot {
         val slots = load(context)
         val finalName = name?.trim()?.takeIf { it.isNotBlank() } ?: autoName(slots)
         if (slots.any { it.name == finalName }) {
-            // 同名已存在，直接返回旧的，不重复创建 —— 避免误覆盖已有 Cookie
             AppLogger.w(TAG, "槽位 $finalName 已存在，复用之")
             return slots.first { it.name == finalName }
         }
+
+        // [GEO-SYNC] 建槽位时就探测出口地理，保证指纹的时区/语言与 IP 同源。
+        // 探测失败不阻断创建：回落到种子生成的时区，同时把错误写进 note。
+        val geo = CloakGeoResolver.resolve(proxy.ifBlank { null })
+
         val seed = CloakFingerprintFactory.randomSeed()
         val slot = Slot(
             name = finalName,
             seed = seed,
-            profileId = CloakFingerprintFactory.profileIdFor(seed)
+            profileId = CloakFingerprintFactory.profileIdFor(seed),
+            proxy = proxy.trim(),
+            exitIp = geo.ip,
+            exitTz = geo.timezone,
+            note = if (geo.ok) geo.riskNote() else "地理探测失败：${geo.error}"
         )
         slots.add(slot)
         save(context, slots)
-        AppLogger.i(TAG, "新建槽位 ${slot.name} seed=${slot.seed} profile=${slot.profileId}")
+        AppLogger.i(
+            TAG,
+            "新建槽位 ${slot.name} seed=${slot.seed} profile=${slot.profileId} " +
+                "proxy=${slot.proxy.ifBlank { "direct" }} exitIp=${slot.exitIp} tz=${slot.exitTz}"
+        )
         return slot
     }
 
@@ -230,7 +264,12 @@ internal object CloakSlotStore {
             sb.append("  · ").append(s.name)
             sb.append("  profile=").append(s.profileId)
             sb.append("  seed=").append(s.seed)
-            if (s.note.isNotBlank()) sb.append("  (").append(s.note).append(')')
+            if (s.proxy.isNotBlank()) {
+                sb.append("\n      proxy=").append(s.proxy)
+                sb.append("  exit=").append(s.exitIp.ifBlank { "?" })
+                sb.append("  exitTz=").append(s.exitTz.ifBlank { "?" })
+            }
+            if (s.note.isNotBlank()) sb.append("\n      ").append(s.note)
             sb.append('\n')
         }
         return sb.toString().trimEnd()

@@ -409,6 +409,7 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
     private fun browserCloakDiag(tool: AITool): ToolResult {
         val action = (param(tool, "action")?.trim()?.lowercase()).orEmpty().ifBlank { "status" }
         val slotName = param(tool, "slot")?.trim().orEmpty()
+        val proxyArg = param(tool, "proxy")?.trim().orEmpty()
         val session = getSession(null)
         val sid = session?.id
         val diag =
@@ -420,8 +421,12 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
             "probe" -> ok(tool.name, diag.liveProbe(sid))
             "new" -> ok(
                 tool.name,
-                diag.newSlot(context.applicationContext, slotName.ifBlank { null })
+                diag.newSlot(context.applicationContext, slotName.ifBlank { null }, proxyArg)
             )
+            "proxytest" -> {
+                if (proxyArg.isBlank()) error(tool.name, "action=proxytest 需要 proxy 参数")
+                else ok(tool.name, diag.proxyTest(proxyArg))
+            }
             "use" -> {
                 if (slotName.isBlank()) error(tool.name, "action=use 需要 slot 参数")
                 else ok(tool.name, diag.useSlot(context.applicationContext, sid, slotName))
@@ -552,17 +557,21 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                 val slotStore = com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
                     .CloakSlotStore
                 val slotParam = param(tool, "fingerprint")?.trim().orEmpty()
+                // [GEO-SYNC] 代理参数：新建槽位时传入，绑到该身份上长期不变。
+                // 主人说"代理随时换" —— 那就是每次换代理都开新槽位，
+                // 旧槽位的 IP 记录保持原样，风控看到的是「不同账号」，不是「同一账号瞬移」。
+                val proxyParam = param(tool, "proxy")?.trim().orEmpty()
                 val slotName: String
                 val slotSeed: String
                 val slotProfile: String
                 if (slotParam.isNotBlank()) {
                     val spec = if (slotParam.startsWith("slot=")) slotParam.removePrefix("slot=") else slotParam
                     if (spec.equals("new", ignoreCase = true) || spec.isBlank()) {
-                        val s = slotStore.createSlot(context.applicationContext)
+                        val s = slotStore.createSlot(context.applicationContext, proxy = proxyParam)
                         slotName = s.name; slotSeed = s.seed; slotProfile = s.profileId
                     } else {
                         val existing = slotStore.find(context.applicationContext, spec)
-                            ?: slotStore.createSlot(context.applicationContext, spec)
+                            ?: slotStore.createSlot(context.applicationContext, spec, proxyParam)
                         slotName = existing.name; slotSeed = existing.seed; slotProfile = existing.profileId
                     }
                 } else {
@@ -587,10 +596,21 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                     val cloakTools =
                         com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools
                     cloakTools.bindSlot(sid, slotName)
+                    // [GEO-SYNC] 用槽位绑定的代理反查出口，覆盖时区/语言
+                    val slotObj = slotStore.find(context.applicationContext, slotName)
+                    val geo = slotObj?.proxy?.takeIf { it.isNotBlank() }?.let {
+                        com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
+                            .CloakGeoResolver.resolve(it)
+                    }
                     cloakTools.setFingerprint(
                         sid,
                         com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak
-                            .CloakFingerprintFactory.build(seed = slotSeed, profileId = slotProfile)
+                            .CloakFingerprintFactory.build(
+                                seed = slotSeed,
+                                profileId = slotProfile,
+                                proxyServer = slotObj?.proxy?.takeIf { it.isNotBlank() },
+                                geo = geo
+                            )
                     )
                 }
 

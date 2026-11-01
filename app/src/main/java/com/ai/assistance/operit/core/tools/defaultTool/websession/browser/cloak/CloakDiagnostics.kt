@@ -128,6 +128,24 @@ new Promise((res)=>{
             sb.append("当前指纹      : (会话尚未绑定，导航时自动取 default 槽位)\n")
         }
 
+        // 代理与出口
+        val curSlotName = sessionId?.let { CloakBrowserTools.slotOf(it) }
+            ?: CloakSlotStore.DEFAULT_SLOT
+        val curSlot = slots.firstOrNull { it.name == curSlotName }
+        if (curSlot != null) {
+            sb.append("槽位代理      : ").append(curSlot.proxy.ifBlank { "(直连，用设备真实出口)" }).append('\n')
+            val geo = CloakGeoResolver.resolve(curSlot.proxy.ifBlank { null })
+            if (geo.ok) {
+                sb.append("出口 IP       : ").append(geo.ip).append('\n')
+                sb.append("出口归属      : ").append(geo.country).append(' ').append(geo.city)
+                    .append(" / ").append(geo.timezone).append('\n')
+                sb.append("出口 ISP      : ").append(geo.isp).append('\n')
+                sb.append("IP 质量       : ").append(geo.riskNote()).append('\n')
+            } else {
+                sb.append("出口 IP       : 探测失败（").append(geo.error).append("）\n")
+            }
+        }
+
         // ---------- 3. 指纹配置 ----------
         sb.append("\n===== 3. 指纹配置 =====\n")
         val fp = active ?: sessionId?.let { CloakBrowserTools.fingerprintOf(it) }
@@ -181,6 +199,31 @@ new Promise((res)=>{
                 issues.add("中文语言配美洲时区（可疑）")
             }
             if (fp.timezone == "UTC") issues.add("时区为 UTC（真实用户极少，高权重破绽）")
+
+            // [GEO-SYNC] 出口 IP 与浏览器时区必须同源 —— 这是最廉价也最致命的判据
+            val boundSlotName = sessionId?.let { CloakBrowserTools.slotOf(it) }
+            val slotObj = boundSlotName?.let { name ->
+                slots.firstOrNull { it.name == name }
+            }
+            if (slotObj != null) {
+                val geo = CloakGeoResolver.resolve(slotObj.proxy.ifBlank { null })
+                if (geo.ok) {
+                    if (geo.timezone.isNotBlank() && geo.timezone != fp.timezone) {
+                        issues.add(
+                            "IP 时区(${geo.timezone}) 与浏览器时区(${fp.timezone}) 不一致 —— " +
+                                "风控最先查这条"
+                        )
+                    }
+                    if (geo.isHosting) {
+                        issues.add("出口 IP 属机房/云厂商（${geo.isp}），住宅代理才是正解")
+                    }
+                    if (geo.isProxy) {
+                        issues.add("出口 IP 已被标记为代理，多数风控直接拒绝")
+                    }
+                } else {
+                    issues.add("出口地理探测失败：${geo.error}（无法验证 IP 与时区是否同源）")
+                }
+            }
 
             if (issues.isEmpty()) {
                 sb.append("✅ 未发现矛盾\n")
@@ -267,7 +310,13 @@ new Promise((res)=>{
         val slot = CloakSlotStore.find(context, slotName)
             ?: return "槽位 $slotName 不存在。用 action=slots 查看，或 action=new 新建。"
         CloakBrowserTools.bindSlot(sessionId, slot.name)
-        val fp = CloakFingerprintFactory.build(seed = slot.seed, profileId = slot.profileId)
+        val geo = if (slot.proxy.isBlank()) null else CloakGeoResolver.resolve(slot.proxy)
+        val fp = CloakFingerprintFactory.build(
+            seed = slot.seed,
+            profileId = slot.profileId,
+            proxyServer = slot.proxy.ifBlank { null },
+            geo = geo
+        )
         CloakBrowserTools.setFingerprint(sessionId, fp)
         return buildString {
             append("已切换到槽位 ").append(slot.name).append('\n')
@@ -279,14 +328,61 @@ new Promise((res)=>{
     }
 
     /** 新建槽位。 */
-    fun newSlot(context: Context, name: String? = null): String {
-        val slot = CloakSlotStore.createSlot(context, name)
+    fun newSlot(context: Context, name: String? = null, proxy: String = ""): String {
+        val slot = CloakSlotStore.createSlot(context, name, proxy)
+        val geo = CloakGeoResolver.resolve(slot.proxy.ifBlank { null })
         return buildString {
             append("已新建槽位 ").append(slot.name).append('\n')
             append("profileId: ").append(slot.profileId).append('\n')
             append("seed     : ").append(slot.seed).append('\n')
             append("Cookie   : 全新空白（该身份尚未产生任何登录态）\n")
+            append("代理     : ").append(slot.proxy.ifBlank { "(直连)" }).append('\n')
+            if (geo.ok) {
+                append("出口 IP  : ").append(geo.ip).append('\n')
+                append("出口归属 : ").append(geo.country).append(' ').append(geo.city)
+                    .append(" / ").append(geo.timezone).append('\n')
+                append("出口 ISP : ").append(geo.isp).append('\n')
+                append("IP 质量  : ").append(geo.riskNote()).append('\n')
+                append("指纹时区 : ").append(geo.timezone)
+                    .append("  语言: ").append(CloakGeoResolver.languageFor(geo.countryCode))
+                    .append("（已与出口 IP 对齐）\n")
+            } else {
+                append("出口探测 : 失败（").append(geo.error)
+                    .append("）—— 指纹时区将回落到种子随机值，可能与 IP 矛盾\n")
+            }
             append("\n用 action=use slot=").append(slot.name).append(" 切换过去。")
+        }
+    }
+
+    /**
+     * 独立测试代理质量，不创建槽位、不改任何状态。
+     *
+     * 主人说代理随时换，所以需要一个"先验货再绑定"的入口：
+     * 只报出口 IP / 归属 / ISP / 是否机房 / 是否已被标记，让主人决定要不要用。
+     */
+    fun proxyTest(proxy: String): String {
+        val geo = CloakGeoResolver.resolve(proxy)
+        return buildString {
+            append("===== 代理检测 =====\n")
+            append("代理    : ").append(proxy).append('\n')
+            if (!geo.ok) {
+                append("结果    : ❌ 不可用 —— ").append(geo.error).append('\n')
+                append("\n可能原因：地址端口错 / 需要认证 / 代理已失效 / 网络不通")
+                return@buildString
+            }
+            append("出口 IP : ").append(geo.ip).append('\n')
+            append("国家    : ").append(geo.country).append(" (").append(geo.countryCode).append(")\n")
+            append("城市    : ").append(geo.city).append('\n')
+            append("时区    : ").append(geo.timezone).append('\n')
+            append("ISP     : ").append(geo.isp).append('\n')
+            append("机房 IP : ").append(if (geo.isHosting) "是 ⚠️" else "否").append('\n')
+            append("代理标记: ").append(if (geo.isProxy) "是 ⚠️" else "否").append('\n')
+            append("移动网络: ").append(if (geo.isMobile) "是" else "否").append('\n')
+            append('\n质量判定: ').append(geo.riskNote()).append('\n')
+            append("\n绑定后指纹将自动设为：\n")
+            append("  时区 ").append(geo.timezone).append('\n')
+            append("  语言 ").append(CloakGeoResolver.languageFor(geo.countryCode)).append('\n')
+            append("\n用法：browser_switch_engine engine=cloak fingerprint=slot=new proxy=").append(proxy)
         }
     }
 

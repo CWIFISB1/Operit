@@ -220,7 +220,14 @@ internal object BrowserEngineBridge {
         // 把槽位名记到会话上，后续 switch/重启都沿用同一身份
         runCatching { CloakBrowserTools.bindSlot(sessionId, slot.name) }
 
-        val fp = CloakFingerprintFactory.build(seed = slot.seed, profileId = slot.profileId)
+        // [GEO-SYNC] 传入槽位绑定的代理与出口地理，让时区/语言跟着 IP 走
+        val geo = if (slot.proxy.isBlank()) null else CloakGeoResolver.resolve(slot.proxy)
+        val fp = CloakFingerprintFactory.build(
+            seed = slot.seed,
+            profileId = slot.profileId,
+            proxyServer = slot.proxy.ifBlank { null },
+            geo = geo
+        )
         runCatching { CloakBrowserTools.setFingerprint(sessionId, fp) }
         AppLogger.i(
             TAG,

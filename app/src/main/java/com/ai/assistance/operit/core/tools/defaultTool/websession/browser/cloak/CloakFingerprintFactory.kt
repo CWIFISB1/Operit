@@ -87,7 +87,20 @@ internal object CloakFingerprintFactory {
      *   否则 cookie / localStorage / IndexedDB 全部沿用上一个账号，
      *   指纹换了也没用 —— 服务端照样能通过存储态把你串起来。
      */
-    fun build(seed: String, profileId: String, proxyServer: String? = null): CloakFingerprint {
+    fun build(
+        seed: String,
+        profileId: String,
+        proxyServer: String? = null,
+        /**
+         * [GEO-SYNC] 出口地理信息。传入则**强制覆盖**时区与语言。
+         *
+         * 为什么必须覆盖：种子只能决定 Canvas/WebGL/字体，
+         * 它不知道这台"设备"的网络位置在哪。
+         * 若 IP 在首尔而时区说巴黎，风控一眼看穿。
+         * 时区与语言必须由出口 IP 反查得出，不能随机。
+         */
+        geo: CloakGeoResolver.GeoInfo? = null
+    ): CloakFingerprint {
         val h = stableHash(seed)
         val r = Random(h)
 
@@ -137,7 +150,17 @@ internal object CloakFingerprintFactory {
         }
 
         // ---------- 时区 / 语言 ----------
-        val loc = LOCALES[abs(h / 31) % LOCALES.size]
+        // 优先用出口 IP 反查结果；没有地理信息时才回落到种子随机。
+        val loc: Locale
+        if (geo != null && geo.ok && geo.timezone.isNotBlank()) {
+            loc = Locale(
+                tz = geo.timezone,
+                lang = CloakGeoResolver.languageFor(geo.countryCode),
+                primary = CloakGeoResolver.languageFor(geo.countryCode).substringBefore('-')
+            )
+        } else {
+            loc = LOCALES[abs(h / 31) % LOCALES.size]
+        }
         // macOS 的字符集声明与 Windows 不同，UA 必须整体替换
         val userAgent: String
         val platform: String
@@ -184,7 +207,10 @@ internal object CloakFingerprintFactory {
             deviceMemory = mem,
             screenWidth = sw,
             screenHeight = sh,
-            geoip = proxyServer.isNullOrBlank() // 有代理时以代理出口为准，不强行按种子时区
+            // 已经用 geo 手工对齐了时区/语言，不需要引擎再做 geoip 猜测。
+            // 引擎的 geoip 依赖它自己能否访问外部服务，行为不可控；
+            // 我们这边是确定性的，所以关掉它避免两套逻辑打架。
+            geoip = geo == null
         )
     }
 
