@@ -32,18 +32,29 @@ import kotlin.math.min
  *  - 本类只负责「把远端画面画出来」和「把本地手指动作翻译成 CDP 输入事件」。
  *  - 浏览器语义（导航、快照、工具调用）仍走 CloakBrowserTools / BrowserEngineBridge。
  *
- * [TEXTUREVIEW-FIX] 2026-11-01 真机第三次复测：
- * 原来继承 SurfaceView，日志已出现「Cloak 画面流启动」，说明 surfaceCreated 正常、
- * 抓帧线程也在跑，但用户看到的仍是一片白。
- * 根因是 SurfaceView 的图层语义：它由 SurfaceFlinger 单独合成在应用窗口之下，
- * 默认 ZOrder 在 View 树底部。Compose 的 AndroidView 外层 Box 铺了不透明背景
- * （MaterialTheme.colorScheme.background），于是把 SurfaceView 整个盖住了 ——
- * 画面在画，但被遮住看不见。
- * 常规解法是 setZOrderOnTop(true)，但那会把 SurfaceView 顶到所有 UI 之上，
- * 连地址栏、工具栏都会被盖住，还得手工处理透明与层级，非常脆。
- * 改继承 TextureView：它作为普通 View 参与 View 树的正常合成，
- * 不存在图层穿透问题，也不需要任何 ZOrder 技巧。
- * 代价是多一次 GPU 拷贝，对 15fps 截图流完全可以接受。
+ * ==================================================================
+ * 演进记录（三次真机失败换来的结论，改动前必读）
+ * ==================================================================
+ * v1 继承 SurfaceView：
+ *   日志出现「画面流启动」，抓帧线程在跑，但用户看到一片白。
+ *   原因：SurfaceView 的 Surface 由 SurfaceFlinger 单独合成在应用窗口**之下**，
+ *   Compose 外层 Box 的不透明背景把它整个盖住。画面在画，但看不见。
+ *
+ * v2 直接改成 TextureView 但保留了 setBackgroundColor：
+ *   启动即崩 —— `UnsupportedOperationException: TextureView doesn't support
+ *   displaying a background drawable`（TextureView.setBackgroundDrawable:483）。
+ *   TextureView 的显示内容只能来自 SurfaceTexture，禁止设置任何背景 drawable。
+ *   本类因此**绝不调用** setBackground/setBackgroundColor/setBackgroundDrawable。
+ *   未出帧时的白底改由「在 lockCanvas 里 drawColor(WHITE)」实现，
+ *   再叠加 Compose 侧 Modifier.background(Color.White) 兜底。
+ *
+ * v3（当前）：
+ *   - 移除全部背景 drawable 调用
+ *   - 修掉帧回收竞态：旧帧绝不在后台线程 recycle，统一 post 到 UI 线程
+ *     在「本帧绘制完成之后」再回收，避免 UI 正在 drawBitmap 时被后台回收导致崩溃
+ *   - 增加 onDetachedFromWindow 清理，避免 View 销毁后抓帧线程泄漏
+ *   - 增加首帧/首绘/无客户端三类诊断日志（各只打一次）
+ * ==================================================================
  */
 internal class CloakSurfaceView(context: Context) : TextureView(context), TextureView.SurfaceTextureListener {
 
@@ -95,9 +106,10 @@ internal class CloakSurfaceView(context: Context) : TextureView(context), Textur
 
     init {
         surfaceTextureListener = this
-        // TextureView 默认不透明即可；这里显式置白，未出帧时是白底而不是黑底。
+        // [关键] 绝对不能调 setBackgroundColor / setBackgroundDrawable：
+        // TextureView 会抛 UnsupportedOperationException，直接启动崩溃。
+        // 未出帧时的白底由 redraw() 里的 canvas.drawColor(Color.WHITE) 负责。
         isOpaque = true
-        setBackgroundColor(Color.WHITE)
     }
 
     // ---------------------------------------------------------------- 生命周期
@@ -106,6 +118,8 @@ internal class CloakSurfaceView(context: Context) : TextureView(context), Textur
         attached = true
         AppLogger.i(TAG, "TextureView surface 就绪 ${width}x$height session=$sessionId")
         startLoop()
+        // 立刻画一次白底，避免首帧到达前是透明/黑。
+        redraw()
     }
 
     override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
@@ -120,6 +134,13 @@ internal class CloakSurfaceView(context: Context) : TextureView(context), Textur
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+
+    override fun onDetachedFromWindow() {
+        // Compose 销毁 AndroidView 时不会自动调 release()，这里兜住线程泄漏。
+        attached = false
+        stopLoop()
+        super.onDetachedFromWindow()
+    }
 
     fun startLoop() {
         if (!running.compareAndSet(false, true)) return
@@ -183,9 +204,13 @@ internal class CloakSurfaceView(context: Context) : TextureView(context), Textur
             }
             val old = frame
             frame = bmp
-            // 旧帧必须回收，否则 15fps 下几秒就把堆打满（1280x800 单帧约 4MB）。
-            old?.takeIf { it !== bmp && !it.isRecycled }?.recycle()
-            uiHandler.post { redraw() }
+            // [帧回收竞态修复] 旧帧绝不在后台线程 recycle：
+            // UI 线程可能正在 drawBitmap 绘制它，后台 recycle 会让绘制读到已释放内存。
+            // 统一 post 到 UI 线程，在本次 redraw 完成后回收。
+            uiHandler.post {
+                redraw()
+                old?.takeIf { it !== frame && !it.isRecycled }?.recycle()
+            }
         } catch (t: Throwable) {
             // 引擎重启期间必然报错，只记一次，不要刷屏。
             val msg = t.message ?: t.javaClass.simpleName
@@ -204,6 +229,7 @@ internal class CloakSurfaceView(context: Context) : TextureView(context), Textur
         try {
             canvas = lockCanvas() ?: return
             if (bmp == null || bmp.isRecycled) {
+                // TextureView 不能设背景色，白底只能画在这里。
                 canvas.drawColor(Color.WHITE)
                 return
             }

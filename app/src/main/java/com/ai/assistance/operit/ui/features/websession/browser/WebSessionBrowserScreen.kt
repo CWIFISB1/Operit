@@ -4,6 +4,7 @@ import android.net.Uri
 import android.graphics.Color as AndroidColor
 import android.widget.FrameLayout
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -310,14 +311,21 @@ internal fun WebSessionBrowserScreen(
                                             if (sid.isEmpty()) null
                                             else com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools.clientOf(sid)
                                         }
-                                        setBackgroundColor(AndroidColor.WHITE)
+                                        // [CRASH-FIX] 这里绝对不能调 setBackgroundColor：
+                                        // TextureView 会抛 UnsupportedOperationException
+                                        // "TextureView doesn't support displaying a background drawable"
+                                        // （真机已复现，启动即崩）。
+                                        // 白底改由 Compose 侧 Modifier.background 提供。
                                     }
                                 },
                                 update = { view ->
                                     view.sessionId = browserState.activeSessionId.orEmpty()
                                     // clientProvider 在 factory 里已绑定到 view 自身字段，无需重建。
                                 },
-                                modifier = Modifier.fillMaxSize()
+                                // 白底兜底：TextureView 自身不能设背景，由 Compose 绘制层提供。
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.White)
                             )
                         } else {
                             AndroidView(
