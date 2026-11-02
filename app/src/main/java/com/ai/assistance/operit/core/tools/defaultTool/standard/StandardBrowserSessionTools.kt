@@ -654,7 +654,12 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
             if (cloakOutcome != null) {
                 session.currentUrl = targetUrl
                 session.pageLoaded = true
+                // [UI-SYNC-FIX] notifySessionStateChanged 只唤醒等到者，不刷 Compose。
+                // 真正刷新 UI 的是 refreshSessionUiOnMain，之前这条路径漏了它，
+                // 表现就是「画面已经变了，地址栏和标题还停在 about:blank」。
+                syncCloakTitleAndUrl(session)
                 notifySessionStateChanged(session)
+                refreshSessionUiOnMain(session.id)
                 return ok(
                     tool.name,
                     buildBrowserResponse(
@@ -694,6 +699,31 @@ class StandardBrowserSessionTools(internal val context: Context) : ToolExecutor 
                 result = "Navigated to ${settlement.session.currentUrl.ifBlank { targetUrl }}"
             )
         )
+    }
+
+    /**
+     * 从 Cloak 内核读回真实 title/url。
+     *
+     * Cloak 是外置 chromium，跳转不会触发 WebView 的 onReceivedTitle，
+     * session.pageTitle 一直是空，UI 标签标题就不更新。
+     */
+    private fun syncCloakTitleAndUrl(session: WebSession) {
+        val js = "(function(){try{return JSON.stringify({u:location.href,t:document.title});}catch(e){return '';}})()"
+        val raw = runCatching {
+            com.ai.assistance.operit.core.tools.defaultTool.websession.browser.cloak.CloakBrowserTools
+                .eval(session.id, js)
+        }.getOrNull() ?: return
+        var body = raw.trim()
+        if (body.length >= 2 && body.startsWith("\"")) {
+            body = body.substring(1, body.length - 1)
+        }
+        body = body.replace("\\\"", "\"")
+        if (!body.startsWith("{")) return
+        val o = runCatching { org.json.JSONObject(body) }.getOrNull() ?: return
+        val u = o.optString("u")
+        val t = o.optString("t")
+        if (u.isNotBlank() && !u.startsWith("about:")) session.currentUrl = u
+        if (t.isNotBlank()) session.pageTitle = t
     }
 
     private fun browserClick(tool: AITool): ToolResult {
