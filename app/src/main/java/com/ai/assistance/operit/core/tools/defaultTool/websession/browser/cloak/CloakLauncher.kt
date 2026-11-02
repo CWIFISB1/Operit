@@ -27,6 +27,23 @@ internal object CloakLauncher {
     private const val XVFB_RESOLUTION = "1280x800x24"
     private const val PROFILE_ROOT = "/root/.operit_cloak/profiles"
     private const val LOG_ROOT = "/root/.operit_cloak/logs"
+
+    /**
+     * proot 内的中文字体目录。
+     *
+     * 为什么必须显式装：proot Ubuntu 基础镜像只带 DejaVu 等西文字体，
+     * fc-list :lang=zh 返回空。Chromium 渲染中文时找不到字形，
+     * 整页中文全变成豆腐块 □□□□（真机实测，百度首页整屏方框）。
+     * 这里在每次启动前确保字体存在，缺了就补，补不了就静默跳过。
+     */
+    private const val CJK_FONT_DIR = "/usr/share/fonts/truetype/cjk"
+
+    /** 字体源：Android 系统自带的思源黑体，体积 31MB，无需联网下载。 */
+    private const val CJK_FONT_SRC = "/system/fonts/NotoSansCJK-Regular.ttc"
+
+    /** fontconfig 配置：把中文字体提到 sans-serif 首位。 */
+    private const val FONTCONF_FILE = "/etc/fonts/local.conf"
+
     private const val BASE_PORT = 9300
     private const val XVFB_PID_FILE = "/root/.operit_cloak/xvfb.pid"
 
@@ -218,6 +235,75 @@ internal object CloakLauncher {
      * 启动 Chromium 并建立 CDP 连接。
      * 已启动则直接复用。
      */
+    /**
+     * 确保 proot 内有中文字体。
+     *
+     * 三步：
+     *  1. 已有字体 + 能 fc-list 出 :lang=zh 就跳过（幂等，不重复拷 31MB）
+     *  2. 从 Android 系统 /system/fonts/NotoSansCJK-Regular.ttc 复制
+     *     （proot 里看不到 /system，走 sdcard 中转）
+     *  3. 写 fontconfig 让 sans-serif 优先用中文字体
+     *
+     * 全部失败也不抛异常，只是中文继续显示方框，不影响其他功能。
+     */
+    private fun ensureCjkFont(context: Context) {
+        val check = proot(context, "fc-list :lang=zh 2>/dev/null | head -1", 10_000L)
+        if (!check.isNullOrBlank()) {
+            AppLogger.i(TAG, "中文字体已就绪")
+            return
+        }
+        AppLogger.i(TAG, "中文字体缺失，开始安装")
+
+        val tmp = "/sdcard/Download/Operit/.cjk_font_tmp.ttc"
+        val copied = runCatching {
+            java.io.File(CJK_FONT_SRC).inputStream().use { input ->
+                java.io.File(tmp).outputStream().use { output ->
+                    input.copyTo(output, 64 * 1024)
+                }
+            }
+            true
+        }.getOrElse { false }
+        if (!copied) {
+            AppLogger.w(TAG, "无法读取系统 CJK 字体，中文可能显示为方框")
+            return
+        }
+
+        val install = proot(
+            context,
+            "mkdir -p $CJK_FONT_DIR 2>/dev/null; " +
+                "cp $tmp $CJK_FONT_DIR/cjk.ttc 2>/dev/null; " +
+                "rm -f $tmp 2>/dev/null; " +
+                "fc-cache -f >/dev/null 2>&1; " +
+                "fc-list :lang=zh 2>/dev/null | head -1",
+            60_000L
+        )
+        if (install.isNullOrBlank()) {
+            AppLogger.w(TAG, "中文字体安装失败，中文可能显示为方框")
+            return
+        }
+
+        val conf = """<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <alias><family>sans-serif</family><prefer><family>Noto Sans CJK SC</family><family>Noto Sans CJK TC</family></prefer></alias>
+  <alias><family>serif</family><prefer><family>Noto Sans CJK SC</family></prefer></alias>
+  <alias><family>monospace</family><prefer><family>Noto Sans CJK SC</family></prefer></alias>
+</fontconfig>
+"""
+        val b64 = android.util.Base64.encodeToString(
+            conf.toByteArray(Charsets.UTF_8),
+            android.util.Base64.NO_WRAP
+        )
+        proot(
+            context,
+            "mkdir -p /etc/fonts 2>/dev/null; " +
+                "echo '$b64' | base64 -d > $FONTCONF_FILE; " +
+                "fc-cache -f >/dev/null 2>&1; fc-match sans-serif 2>/dev/null",
+            30_000L
+        )
+        AppLogger.i(TAG, "中文字体安装完成")
+    }
+
     fun launch(context: Context, fingerprint: CloakFingerprint): CloakCdpClient {
         // [FINGERPRINT-ROTATION] 2026-11-01 修复：
         // 原逻辑「已有连接直接复用」导致换指纹完全不生效 ——
@@ -261,6 +347,9 @@ internal object CloakLauncher {
             val logFile = "$LOG_ROOT/cloak_$port.log"
 
             proot(context, "mkdir -p $profileDir $LOG_ROOT 2>/dev/null", 20_000L)
+            // 中文字体：缺则补，补不了静默跳过（不阻断启动）
+            runCatching { ensureCjkFont(context) }
+                .onFailure { AppLogger.w(TAG, "中文字体检查失败（忽略）: ${it.message}") }
             // 残留进程清理（2026-10-30 补）。
             // 实测故障：上一次启动失败后 chrome 主进程仍占着同一 profileDir，
             // 新实例启动时 Chromium 把参数转交给已有实例，自己立刻退出，只往日志写一句
