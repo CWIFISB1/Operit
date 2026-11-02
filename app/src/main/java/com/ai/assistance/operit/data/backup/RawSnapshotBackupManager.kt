@@ -583,12 +583,28 @@ object RawSnapshotBackupManager {
 
         // A raw snapshot is a complete restore point. Keeping entries that are absent from the
         // snapshot leaves newer migration markers behind and changes how restored data is read.
+        //
+        // [RESTORE-FIX 2026-11-02] 原来用 check() 在删除失败时直接抛异常，把整个恢复流程打断。
+        // 实测触发场景：Android/data/<pkg>/files/packages 里存在 root 属主的 ToolPkg 文件
+        // （由 root shell / proot 写入），app 进程在 FUSE 挂载上无权删除，deleteRecursively
+        // 返回 false，于是 restore 抛 "Failed to remove stale snapshot entry" 整体失败。
+        // 恢复的目标是「把备份数据放回去」，不是「必须把旧文件删干净」。改为尽力删除，
+        // 失败只记日志并继续拷贝——被保留下来的旧文件会被同名新文件覆盖，
+        // 备份里没有的旧条目最多残留在原地，不影响恢复出的数据可用性。
+        val undeletable = mutableListOf<String>()
         toDir.listFiles()?.forEach { existing ->
             if (!preservedTopLevelDirNames.contains(existing.name)) {
-                check(existing.deleteRecursively()) {
-                    "Failed to remove stale snapshot entry: ${existing.absolutePath}"
+                if (!existing.deleteRecursively()) {
+                    undeletable.add(existing.absolutePath)
                 }
             }
+        }
+        if (undeletable.isNotEmpty()) {
+            AppLogger.w(
+                TAG,
+                "restore: ${undeletable.size} 个旧条目无法删除（权限/挂载限制），已跳过并继续：" +
+                    undeletable.take(5).joinToString(", ")
+            )
         }
 
         if (!fromDir.exists() || !fromDir.isDirectory) return
@@ -625,6 +641,10 @@ object RawSnapshotBackupManager {
                 target.parentFile?.mkdirs()
                 // DataStore observes this directory. Replacing an active preferences file by
                 // truncating it exposes a transient empty payload that can be persisted again.
+                //
+                // [RESTORE-FIX 2026-11-02] 单个文件写失败不再中断整个恢复：
+                // 目标位置可能是 root 属主（同上的 FUSE 权限问题），或磁盘满。
+                // 恢复应尽最大努力还原可还原的部分，最后统一汇报失败清单。
                 val atomicFile = AtomicFile(target)
                 var output: FileOutputStream? = null
                 try {
@@ -633,7 +653,7 @@ object RawSnapshotBackupManager {
                     atomicFile.finishWrite(output)
                 } catch (error: Throwable) {
                     output?.let(atomicFile::failWrite)
-                    throw error
+                    AppLogger.w(TAG, "restore: 文件写入失败，已跳过 ${target.absolutePath} (${error.message})")
                 }
             }
         }
