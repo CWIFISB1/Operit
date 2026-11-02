@@ -75,6 +75,25 @@ open class AccessibilityUITools(context: Context) : StandardUITools(context) {
     }
 
     /** Gets the current UI page/window information */
+    /**
+     * 给 UI Agent 用的结构化页面快照。
+     *
+     * 与 getPageInfo 的区别：那个返回 ToolResult（给工具调用方），
+     * 这个直接返回已裁剪的树文本（给提示词），节点数受
+     * SimplifiedUINode.MAX_TREE_NODES 限制，超长页面不会撑爆上下文。
+     *
+     * 失败一律返回 null，Agent 侧会自动退回「只用截图」模式，不中断任务。
+     */
+    override suspend fun readUiTree(): String? {
+        return runCatching {
+            if (!isAccessibilityServiceEnabled()) return@runCatching null
+            val xml = getUIHierarchyWithRetry()
+            if (xml.isBlank()) return@runCatching null
+            val tree = simplifyLayout(xml).toTreeString()
+            tree.takeIf { it.isNotBlank() }
+        }.getOrNull()
+    }
+
     override suspend fun getPageInfo(tool: AITool): ToolResult {
         return try {
             withAccessibilityCheck(tool) {

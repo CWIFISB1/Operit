@@ -790,6 +790,11 @@ $toolList
     Launch是启动目标app的操作，这比通过主屏幕导航更快。此操作完成后，您将自动收到结果状态的截图。
 - do(action="Tap", element=[x,y])  
     Tap是点击操作，点击屏幕上的特定点。可用此操作点击按钮、选择项目、从主屏幕打开应用程序，或与任何可点击的用户界面元素进行交互。坐标系统从左上角 (0,0) 开始到右下角（999,999)结束。此操作完成后，您将自动收到结果状态的截图。
+    【重要】每轮消息里会附带 [UI TREE] 段，列出当前页面所有可交互元素，格式为：
+    ▶ [类名] T:"文本" ID:资源ID ⮞ [left,top][right,bottom]
+    ⮞ 后面是该元素在屏幕上的真实像素范围。取中心点 ((left+right)/2, (top+bottom)/2)，
+    再按屏幕分辨率换算成 0-999 坐标，比对着截图估坐标准确得多。
+    只要 UI TREE 存在，就优先用它定位元素，不要凭感觉点。
 - do(action="Tap", element=[x,y], message="重要操作")  
     基本功能同Tap，点击涉及财产、支付、隐私等敏感按钮时触发。
 - do(action="Type", text="xxx")  
@@ -857,6 +862,11 @@ $toolList
      Launch the target app. This is faster and more reliable than navigating from the home screen. After this, you will automatically receive a screenshot of the resulting state.
  - do(action="Tap", element=[x,y])
      Tap a specific point on screen. Use it to tap buttons, select items, open apps from home screen, or interact with any clickable UI element. Coordinate system ranges from top-left (0,0) to bottom-right (999,999). After this, you will automatically receive a screenshot.
+     IMPORTANT: each turn carries a [UI TREE] section listing every interactive element as
+     "▶ [Class] T:"text" ID:resourceId ⮞ [left,top][right,bottom]".
+     The ⮞ part is the element's real pixel bounds. Take its center
+     ((left+right)/2, (top+bottom)/2) and convert to 0-999 coordinates.
+     Whenever UI TREE is present, locate elements from it instead of eyeballing the screenshot.
  - do(action="Tap", element=[x,y], message="important action")
      Same as Tap, but used when tapping sensitive buttons related to payments, privacy, etc.
  - do(action="Type", text="xxx")

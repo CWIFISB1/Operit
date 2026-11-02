@@ -902,6 +902,9 @@ data class BluetoothBleNotificationEntry(
 
 /** Represents UI node structure for hierarchical display */
 @Serializable
+/** 单次 toTreeString 最多输出多少个节点。 */
+private const val MAX_TREE_NODES = 120
+
 data class SimplifiedUINode(
         val className: String?,
         val text: String?,
@@ -912,7 +915,21 @@ data class SimplifiedUINode(
         val children: List<SimplifiedUINode>
 ) {
     fun toTreeString(indent: String = ""): String {
+        return toTreeStringLimited(indent, intArrayOf(MAX_TREE_NODES))
+    }
+
+    /**
+     * 带节点预算的树输出。
+     *
+     * 为什么要预算：复杂电商页 UI 树有 2000+ 节点，整棵树塞进提示词
+     * 既烧 token 又容易把堆打满。这里给一个硬上限，超出直接停止。
+     *
+     * @param budget 单元素数组当可变计数器用（Kotlin 里传 Int 是值传递）
+     */
+    private fun toTreeStringLimited(indent: String, budget: IntArray): String {
         if (!shouldKeepNode()) return ""
+        if (budget[0] <= 0) return ""
+        budget[0] -= 1
 
         val sb = StringBuilder()
 
@@ -941,7 +958,7 @@ data class SimplifiedUINode(
         sb.append("\n")
 
         // Process children recursively
-        children.forEach { sb.append(it.toTreeString("$indent  ")) }
+        children.forEach { sb.append(it.toTreeStringLimited("$indent  ", budget)) }
 
         return sb.toString()
     }

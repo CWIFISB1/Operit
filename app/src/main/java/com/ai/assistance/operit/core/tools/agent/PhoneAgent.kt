@@ -660,12 +660,24 @@ class PhoneAgent(
         AppLogger.d("PhoneAgent", "[$agentId] _executeStep: begin, step=$_stepCount")
 
         val screenshotLink = actionHandler.captureScreenshotForAgent()
+        // [UI-TREE] 同时给截图和结构化 UI 树。
+        //
+        // 为什么需要：只有截图时模型得靠像素猜坐标，点偏是常态。
+        // 附上 UI 树后，模型能直接读到每个可点元素的 text/id/bounds，
+        // 定位精度从「看图估」变成「按 bounds 中心点算」。
+        // 树已由 SimplifiedUINode 裁剪（只保留可点/有文本/关键控件，上限 120 节点）。
+        val uiTree = actionHandler.readUiTreeForAgent()
         val screenInfo = buildString {
             if (screenshotLink != null) {
                 appendLine("[SCREENSHOT] Below is the latest screen image:")
                 appendLine(screenshotLink)
             } else {
                 appendLine("No screenshot available for this step.")
+            }
+            if (!uiTree.isNullOrBlank()) {
+                appendLine()
+                appendLine("[UI TREE] 当前页面可交互元素（▶=可点击，⮞=bounds，坐标中心点可直接用于 Tap）：")
+                appendLine(uiTree)
             }
         }.trim()
 
@@ -921,6 +933,13 @@ class ActionHandler(
         }
         return ShowerUsageContext(isAdbOrHigher = permissionState.isAdbOrHigher, showerDisplayId = showerId)
     }
+
+    /**
+     * 读取当前页面 UI 树（已裁剪）。失败或不可用时返回 null，不影响主流程。
+     */
+    suspend fun readUiTreeForAgent(): String? = runCatching {
+        toolImplementations.readUiTree()?.takeIf { it.isNotBlank() }
+    }.getOrNull()
 
     suspend fun captureScreenshotForAgent(): String? {
         val showerCtx = resolveShowerUsageContext()
@@ -1476,6 +1495,14 @@ class ActionHandler(
 
 /** Interface for providing tool implementations to the ActionHandler. */
 interface ToolImplementations {
+    /**
+     * 读取当前页面的 UI 结构。
+     *
+     * 返回已裁剪的树字符串（节点数受 MAX_TREE_NODES 限制）。
+     * 默认返回 null，表示该实现不支持结构化读取，此时 Agent 只用截图。
+     */
+    suspend fun readUiTree(): String? = null
+
     suspend fun tap(tool: AITool): ToolResult
     suspend fun longPress(tool: AITool): ToolResult
     suspend fun setInputText(tool: AITool): ToolResult

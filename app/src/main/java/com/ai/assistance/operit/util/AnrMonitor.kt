@@ -44,8 +44,8 @@ class AnrMonitor(
 ) {
     companion object {
         // 默认阈值设置
-        private const val ANR_THRESHOLD_MS = 1000L     // 1秒，标准ANR阈值
-        private const val WARNING_THRESHOLD_MS = 500L // 0.5秒，警告阈值
+        private const val ANR_THRESHOLD_MS = 1500L     // 1.5秒：Compose 重组期偶发长帧不应当 ANR，降低误报
+        private const val WARNING_THRESHOLD_MS = 800L // 0.8秒：原 500ms 在中低端机频刷日志
         private const val SAMPLING_INTERVAL_MS = 100L  // 100毫秒采样间隔
         private const val MAX_STACK_TRACES = 10        // 最大堆栈跟踪数
         
