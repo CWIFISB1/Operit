@@ -128,6 +128,17 @@ class PhoneAgent(
     val stepCount: Int
         get() = _stepCount
 
+    /**
+     * Note 动作收集到的页面笔记。
+     *
+     * 用途：模型让「把这个页面记下来」时先暂存，Call_API 或任务收尾时
+     * 一并回灌上下文做总结。放内存里，reset() 时清空，不落盘。
+     */
+    private val notes = mutableListOf<String>()
+
+    /** Call_API 请求排队（instruction 原文），同样在 reset() 时清空。 */
+    private val callApiRequests = mutableListOf<String>()
+
     private val _contextHistory = mutableListOf<Pair<String, String>>()
     val contextHistory: List<Pair<String, String>>
         get() = _contextHistory.toList()
@@ -651,6 +662,8 @@ class PhoneAgent(
     /** Reset the agent state for a new task. */
     fun reset() {
         _contextHistory.clear()
+        notes.clear()
+        callApiRequests.clear()
         _stepCount = 0
     }
 
@@ -707,6 +720,17 @@ class PhoneAgent(
         if (parsedAction.metadata == "do") {
             awaitIfPaused()
             val execResult = actionHandler.executeAgentAction(parsedAction)
+            // [ACTION-FEEDBACK] 把执行结果写回上下文。
+            //
+            // 为什么需要：旧实现只把 execResult.message 放进 StepResult，
+            // 它最终只显示在 UI 进度条上，从不进入 _contextHistory。
+            // 结果就是模型能看到自己「说了要长按」，却看不到系统回
+            // 「这个动作不存在」——界面没变化时它只能瞎猜。
+            // 现在失败统一回灌一行，成功但带说明也回灌，模型每轮都能对上账。
+            val feedback = buildActionFeedback(execResult)
+            if (feedback != null) {
+                _contextHistory.add("user" to feedback)
+            }
             if (execResult.shouldFinish) {
                  return StepResult(success = execResult.success, finished = true, action = parsedAction, thinking = thinking, message = execResult.message)
             }
@@ -715,6 +739,24 @@ class PhoneAgent(
 
         val errorMessage = "Unknown action format: ${parsedAction.metadata}"
         return StepResult(success = false, finished = true, action = parsedAction, thinking = thinking, message = errorMessage)
+    }
+
+    /**
+     * 把动作执行结果拼成一行回灌上下文。
+     *
+     * 只回灌「有价值的」结果：
+     *  - 失败必须回灌（含原因）
+     *  - 成功但带 message 也回灌（例如 Note 计数、Call_API 排队）
+     *  - 纯成功且无 message 不回灌，节省 token（截图已能体现）
+     */
+    private fun buildActionFeedback(result: ActionExecResult): String? {
+        val msg = result.message?.takeIf { it.isNotBlank() } ?: return null
+        return if (result.success) {
+            "** Action Feedback **\n上一步动作成功：$msg"
+        } else {
+            "** Action Feedback **\n上一步动作失败：$msg\n" +
+                "请调整策略：换一种动作、换坐标，或直接用 finish 说明原因。"
+        }
     }
 
     private fun extractTagContent(text: String, tag: String): String? {
@@ -1197,6 +1239,105 @@ class ActionHandler(
                 delay((seconds * 1000).toLong().coerceAtLeast(0L))
                 ok()
             }
+            "Long Press" -> {
+                val element = fields["element"] ?: return fail(message = "No element for Long Press")
+                val (x, y) = parseRelativePoint(element)
+                    ?: return fail(message = "Invalid coordinates for Long Press: $element")
+                val exec = withAgentUiHiddenForAction(showerCtx) {
+                    if (showerCtx.canUseShowerForInput) {
+                        val okPress = ShowerController.longPress(agentId, x, y)
+                        if (okPress) ok() else fail(message = "Shower LONG_PRESS failed at ($x,$y)")
+                    } else {
+                        val params = withDisplayParam(
+                            listOf(
+                                ToolParameter("x", x.toString()),
+                                ToolParameter("y", y.toString())
+                            )
+                        )
+                        val result = toolImplementations.longPress(AITool("long_press", params))
+                        if (result.success) ok() else fail(message = result.error ?: "Long press failed")
+                    }
+                }
+                if (exec.success && !exec.shouldFinish) delay(POST_NON_WAIT_ACTION_DELAY_MS)
+                exec
+            }
+
+            "Double Tap" -> {
+                val element = fields["element"] ?: return fail(message = "No element for Double Tap")
+                val (x, y) = parseRelativePoint(element)
+                    ?: return fail(message = "Invalid coordinates for Double Tap: $element")
+                val exec = withAgentUiHiddenForAction(showerCtx) {
+                    val first = if (showerCtx.canUseShowerForInput) {
+                        ShowerController.tap(agentId, x, y)
+                    } else {
+                        val params = withDisplayParam(
+                            listOf(
+                                ToolParameter("x", x.toString()),
+                                ToolParameter("y", y.toString())
+                            )
+                        )
+                        toolImplementations.tap(AITool("tap", params)).success
+                    }
+                    if (!first) {
+                        fail(message = "Double tap first hit failed at ($x,$y)")
+                    } else {
+                        // 双击间隔必须短于系统 doubleTapTimeout（通常 300ms），取 120ms
+                        delay(120)
+                        val second = if (showerCtx.canUseShowerForInput) {
+                            ShowerController.tap(agentId, x, y)
+                        } else {
+                            val params = withDisplayParam(
+                                listOf(
+                                    ToolParameter("x", x.toString()),
+                                    ToolParameter("y", y.toString())
+                                )
+                            )
+                            toolImplementations.tap(AITool("tap", params)).success
+                        }
+                        if (second) ok() else fail(message = "Double tap second hit failed at ($x,$y)")
+                    }
+                }
+                if (exec.success && !exec.shouldFinish) delay(POST_NON_WAIT_ACTION_DELAY_MS)
+                exec
+            }
+
+            "Type_Name" -> {
+                // 与 Type 完全同路径，只是语义上标记「这是个联系人名字」，
+                // 便于模型区分「搜索框文字」与「收件人姓名」两种输入场景。
+                val text = fields["text"] ?: fields["name"] ?: ""
+                if (text.isBlank()) return fail(message = "No text for Type_Name")
+                return executeAgentAction(
+                    ParsedAgentAction(
+                        metadata = "do",
+                        actionName = "Type",
+                        fields = fields + ("text" to text)
+                    )
+                )
+            }
+
+            "Note" -> {
+                val message = fields["message"] ?: fields["text"] ?: ""
+                if (message.isBlank()) return fail(message = "No message for Note")
+                notes.add(message)
+                ok(message = "Note recorded (${notes.size} total)")
+            }
+
+            "Call_API" -> {
+                // 让模型对当前页面/已记录的 notes 做一次总结或评论。
+                // 这里不额外起一次 LLM 调用（会拖慢主循环），
+                // 而是把 instruction 与已记录的 notes 一起回灌到上下文，
+                // 由下一轮模型自然完成「总结」这件事。
+                val instruction = fields["instruction"] ?: fields["message"] ?: ""
+                callApiRequests.add(instruction)
+                ok(message = "Call_API queued: " + instruction.take(80))
+            }
+
+            "Interact" -> {
+                // 多个可选分支时请求人工决策；不结束任务，只挂起交还控制权。
+                val message = fields["message"] ?: "Agent requests human decision"
+                ok(shouldFinish = true, message = message)
+            }
+
             "Take_over" -> ok(shouldFinish = true, message = fields["message"] ?: "User takeover required")
             else -> fail(message = "Unknown action: $actionName")
         }

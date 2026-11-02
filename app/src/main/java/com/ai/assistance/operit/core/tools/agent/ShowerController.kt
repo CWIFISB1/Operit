@@ -3,6 +3,7 @@ package com.ai.assistance.operit.core.tools.agent
 import android.content.Context
 import com.ai.assistance.showerclient.ShowerController as ClientShowerController
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.delay
 
 /**
  * Lightweight controller to talk to the Shower server running locally on the device.
@@ -122,6 +123,23 @@ object ShowerController {
         getInstance(agentId).touchUp(x, y)
 
     suspend fun touchUp(x: Int, y: Int): Boolean = touchUp("default", x, y)
+
+    /**
+     * 长按：按下 → 保持 → 抬起。
+     *
+     * 组合已有的 touchDown / touchUp，不引入新的注入通道。
+     * 默认 600ms，符合 Android 系统 longPressTimeout(500ms) 之上，
+     * 又能被绝大多数应用识别为长按而非拖拽。
+     */
+    suspend fun longPress(agentId: String, x: Int, y: Int, durationMs: Long = 600L): Boolean {
+        val down = touchDown(agentId, x, y)
+        if (!down) return false
+        delay(durationMs)
+        return touchUp(agentId, x, y)
+    }
+
+    suspend fun longPress(x: Int, y: Int, durationMs: Long = 600L): Boolean =
+        longPress("default", x, y, durationMs)
 
     suspend fun injectTouchEvent(
         agentId: String,
