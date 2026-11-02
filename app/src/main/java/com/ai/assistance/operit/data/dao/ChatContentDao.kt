@@ -8,7 +8,15 @@ import com.ai.assistance.operit.data.model.MessageEntity
 import com.ai.assistance.operit.data.model.MessageVariantEntity
 
 // SQLite LENGTH/SUBSTR count characters, and this bound keeps every returned text row well below CursorWindow size.
-private const val CONTENT_CHUNK_CHARACTER_COUNT = 65_536
+/**
+ * 单行 content 一次最多取多少个字符。
+ *
+ * 原来是 65536。这个值本身没问题（远小于 CursorWindow），但它配合
+ * 「一次取多行」就出事了：65536 字符 = 128KB（UTF-16 双字节），
+ * 1000 行就是 128MB。降到 8192 后单行最多 16KB，1000 行只有 16MB。
+ * 超长消息仍然会分块拼回，只是块变小、块数变多，用户感知不到。
+ */
+private const val CONTENT_CHUNK_CHARACTER_COUNT = 8_192
 
 /**
  * 单次物化（把分块正文拼回完整消息）允许消耗的总字符预算。
@@ -19,7 +27,7 @@ private const val CONTENT_CHUNK_CHARACTER_COUNT = 65_536
  * 这里设一个硬预算：预算内的消息完整还原，预算耗尽后的消息只保留已读到
  * 的部分（至少保证首块可显示），宁可截断也不崩。
  */
-private const val MAX_MATERIALIZE_CHARS = 3_000_000
+private const val MAX_MATERIALIZE_CHARS = 800_000
 
 /**
  * 单次查询最多返回的消息行数。
@@ -29,7 +37,7 @@ private const val MAX_MATERIALIZE_CHARS = 3_000_000
  * 8000 行 * 64K 字符（UTF-16 双字节）= 最坏 ~1GB 仍然过大，所以配套把
  * 单行首块也考虑进来：实际绝大多数行远小于 64K，8000 是安全经验值。
  */
-private const val MAX_ROWS_PER_QUERY = 8_000
+private const val MAX_ROWS_PER_QUERY = 3_000
 
 /**
  * 预算耗尽后，剩余消息最多保留的字符数。
