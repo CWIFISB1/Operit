@@ -132,6 +132,18 @@ class PhoneAgent(
     val contextHistory: List<Pair<String, String>>
         get() = _contextHistory.toList()
 
+    /**
+     * 上下文裁剪阈值。
+     *
+     * 为什么需要：旧实现只删上一轮的截图链接，文字与 think 链全部累积。
+     * 一个 50 步的任务就是 50 轮完整对话，堆里能到几十 MB，
+     * 叠加长会话聊天库就是 OOM（实测过一次 StringBuilder.append 崩溃）。
+     * 现在按「保留最近 N 轮 + 总字符上限」双阈值裁剪，历史恒定有界。
+     */
+    private val MAX_CONTEXT_TURNS = 12
+    private val MAX_CONTEXT_CHARS = 48_000
+
+
     private var pauseFlow: StateFlow<Boolean>? = null
 
     private val requiresVirtualScreen: Boolean = agentId.isNotBlank() && agentId != "default"
@@ -592,6 +604,50 @@ class PhoneAgent(
         }
     }
 
+    /**
+     * 裁剪上下文，保证堆占用恒定。
+     *
+     * 策略：
+     *  1. system 消息永远保留（在 index 0）
+     *  2. 保留最近 MAX_CONTEXT_TURNS 轮
+     *  3. 若仍超 MAX_CONTEXT_CHARS，从最老的 user 轮开始丢
+     *  4. 丢弃时插入一条省略说明，让模型知道历史被截断过
+     */
+    /**
+     * 裁剪上下文，保证堆占用恒定。
+     *
+     * 关键约束：全程原地删改，**绝不复制整个列表**。
+     * 之前的写法 `subList(...).toMutableList()` 会整表复制一份，
+     * 长任务时内存瞬翻倍，正好踩在 OOM 上。
+     *
+     * 策略：
+     *  1. system 消息永远保留（index 0）
+     *  2. 从最老的 user 轮开始原地 removeAt，直到满足轮数 + 字符双阈值
+     *  3. 插入一条省略说明，让模型知道历史被截断过
+     */
+    private fun trimContext() {
+        if (_contextHistory.size <= 2) return
+        val hasSystem = _contextHistory.firstOrNull()?.first == "system"
+        val bodyStart = if (hasSystem) 1 else 0
+
+        // 1) 轮数上限：原地删，从头删
+        while (_contextHistory.size - bodyStart > MAX_CONTEXT_TURNS) {
+            _contextHistory.removeAt(bodyStart)
+        }
+
+        // 2) 字符上限：原地逐条累加，超了就删最老的
+        while (_contextHistory.size - bodyStart > 2) {
+            var total = 0L
+            for (i in bodyStart until _contextHistory.size) {
+                val e = _contextHistory[i]
+                total += e.first.length + e.second.length
+            }
+            if (total <= MAX_CONTEXT_CHARS) break
+            _contextHistory.removeAt(bodyStart)
+        }
+    }
+
+
     /** Reset the agent state for a new task. */
     fun reset() {
         _contextHistory.clear()
@@ -640,6 +696,8 @@ class PhoneAgent(
 
         val parsedAction = parseAgentAction(answer)
         actionHandler.removeImagesFromLastUserMessage(_contextHistory)
+        // 每步裁剪一次，避免长任务把堆打满（对标 artemis 的 history compression）
+        trimContext()
 
         if (parsedAction.metadata == "finish") {
             val message = parsedAction.fields["message"] ?: "Task finished."
