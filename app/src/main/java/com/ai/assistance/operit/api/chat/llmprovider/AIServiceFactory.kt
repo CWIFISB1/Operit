@@ -529,6 +529,7 @@ object AIServiceFactory {
             ApiProviderType.PPINFRA,
             ApiProviderType.NOVITA,
             ApiProviderType.MINIMAX,
+            ApiProviderType.ZEN_LOCAL,
             ApiProviderType.OTHER ->
                 OpenAIProvider(
                     apiEndpoint = config.apiEndpoint,

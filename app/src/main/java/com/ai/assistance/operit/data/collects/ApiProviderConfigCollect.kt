@@ -44,7 +44,8 @@ object ApiProviderConfigs {
             defaultModelName = "gemini-3.7-flash",
             defaultApiEndpoint = "https://daily-cloudcode-pa.googleapis.com",
             requiresApiKey = false,
-        ),
+        ),
+
         ProviderApiConfig(
             providerType = ApiProviderType.OPENAI_RESPONSES_GENERIC,
             defaultModelName = "",
@@ -189,6 +190,17 @@ object ApiProviderConfigs {
                 ProviderEndpointOption(
                     endpoint = "https://opencode.ai/zen/go",
                     label = "Go"
+                )
+            )
+        ),
+        ProviderApiConfig(
+            providerType = ApiProviderType.ZEN_LOCAL,
+            defaultModelName = "beam-free",
+            defaultApiEndpoint = "http://127.0.0.1:8790/v1/chat/completions",
+            endpointOptions = listOf(
+                ProviderEndpointOption(
+                    endpoint = "http://127.0.0.1:8790/v1/chat/completions",
+                    label = "Zen 本机隧道"
                 )
             )
         ),

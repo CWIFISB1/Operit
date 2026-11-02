@@ -108,6 +108,7 @@ object ModelListFetcher {
                     ApiProviderType.DEEPSEEK -> "${extractBaseUrl(apiEndpoint)}/v1/models"
                     ApiProviderType.OPENROUTER -> "${extractBaseUrl(apiEndpoint)}/v1/models"
                     ApiProviderType.OPENCODE -> OpenCodeRouting.modelsEndpoint(apiEndpoint)
+                    ApiProviderType.ZEN_LOCAL -> "${extractBaseUrl(apiEndpoint)}/v1/models"
                     ApiProviderType.FOUR_ROUTER -> "${extractBaseUrl(apiEndpoint)}/v1/models"
                     ApiProviderType.NOUS_PORTAL -> "${extractBaseUrl(apiEndpoint)}/v1/models"
                     ApiProviderType.MOONSHOT -> "${extractBaseUrl(apiEndpoint)}/v1/models"
@@ -371,6 +372,7 @@ object ModelListFetcher {
                                     ApiProviderType.BAICHUAN,
                                      ApiProviderType.OPENROUTER,
                                      ApiProviderType.OPENCODE,
+                                     ApiProviderType.ZEN_LOCAL,
                                      ApiProviderType.FOUR_ROUTER,
                                     ApiProviderType.NOUS_PORTAL,
                                     ApiProviderType.INFINIAI,

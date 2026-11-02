@@ -4247,6 +4247,7 @@
     <string name="provider_iflow">iFlow (Xingchen Qianxun)</string>
     <string name="provider_openrouter">OpenRouter (OpenRouter)</string>
     <string name="provider_opencode">OpenCode (Anomaly Innovations)</string>
+    <string name="provider_zenlocal">Zen 免费模型（本机隧道）</string>
     <string name="provider_4router">4Router</string>
     <string name="provider_nous_portal">Nous Portal (Nous Research)</string>
     <string name="provider_infiniai">Infini-AI (Infini-AI)</string>

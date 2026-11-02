@@ -139,6 +139,7 @@ private val modelAggregationProviderOrder =
         ApiProviderType.IFLOW,
         ApiProviderType.OPENROUTER,
         ApiProviderType.OPENCODE,
+        ApiProviderType.ZEN_LOCAL,
         ApiProviderType.FOUR_ROUTER,
         ApiProviderType.NVIDIA,
         ApiProviderType.PPINFRA,
@@ -1763,6 +1764,7 @@ private fun getBuiltInProviderDisplayName(provider: ApiProviderType, context: an
         ApiProviderType.SILICONFLOW -> context.getString(R.string.provider_siliconflow)
         ApiProviderType.IFLOW -> context.getString(R.string.provider_iflow)
         ApiProviderType.OPENROUTER -> context.getString(R.string.provider_openrouter)
+        ApiProviderType.ZEN_LOCAL -> context.getString(R.string.provider_zenlocal)
         ApiProviderType.OPENCODE -> context.getString(R.string.provider_opencode)
         ApiProviderType.FOUR_ROUTER -> context.getString(R.string.provider_4router)
         ApiProviderType.NOUS_PORTAL -> context.getString(R.string.provider_nous_portal)
@@ -2503,6 +2505,7 @@ private fun getProviderColor(providerTypeId: String): androidx.compose.ui.graphi
         ApiProviderType.SILICONFLOW -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.6f)
         ApiProviderType.IFLOW -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.55f)
         ApiProviderType.OPENROUTER -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.6f)
+        ApiProviderType.ZEN_LOCAL -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.72f)
         ApiProviderType.OPENCODE -> MaterialTheme.colorScheme.primary.copy(alpha = 0.68f)
         ApiProviderType.FOUR_ROUTER -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.56f)
         ApiProviderType.NOUS_PORTAL -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.52f)

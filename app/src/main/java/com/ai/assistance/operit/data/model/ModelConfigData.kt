@@ -9,7 +9,8 @@ enum class ApiProviderType {
         XAI, // Grok（SpaceXAI）
         OPENAI_RESPONSES, // ChatGPT Responses（OpenAI）
         OPENAI_CODEX, // Codex（OpenAI）
-        ANTIGRAVITY, // Antigravity（Google）
+        ANTIGRAVITY, // Antigravity（Google）
+
         OPENAI_RESPONSES_GENERIC, // OpenAI Responses（通用）
         OPENAI_GENERIC, // OpenAI（通用）
         ANTHROPIC, // Claude（Anthropic）
@@ -43,6 +44,7 @@ enum class ApiProviderType {
         PPINFRA, // 派欧云（PPIO）
         NOVITA, // Novita（Novita AI）
         MINIMAX, // MiniMax（MiniMax）
+        ZEN_LOCAL, // Zen 免费模型（本机 127.0.0.1:8790，真客户端隧道）
         OTHER; // 其他（自定义）
 
         companion object {
@@ -199,7 +201,8 @@ data class ModelConfigData(
 
         // 请求频率限制配置
         val requestLimitPerMinute: Int = 0, // 每分钟最大请求次数，0表示不限流
-        val maxConcurrentRequests: Int = 0, // 最大并发请求数，0表示不限制
+        val maxConcurrentRequests: Int = 0, // 最大并发请求数，0表示不限制
+
 )
 
 /** 简化版的模型配置数据，用于列表显示 */

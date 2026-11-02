@@ -88,7 +88,8 @@ object EndpointCompleter {
             }
 
             ApiProviderType.OPENAI_CODEX,
-            ApiProviderType.ANTIGRAVITY, -> {
+            ApiProviderType.ANTIGRAVITY,
+ -> {
                 return endpoint
             }
 
@@ -119,6 +120,7 @@ object EndpointCompleter {
             ApiProviderType.GOOGLE,
             ApiProviderType.GEMINI_GENERIC,
             ApiProviderType.OPENCODE,
+            ApiProviderType.ZEN_LOCAL,
             ApiProviderType.MNN -> {
                 return endpoint
             }
