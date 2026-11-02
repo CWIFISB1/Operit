@@ -595,20 +595,54 @@ object RawSnapshotBackupManager {
         toDir.listFiles()?.forEach { existing ->
             if (!preservedTopLevelDirNames.contains(existing.name)) {
                 if (!existing.deleteRecursively()) {
-                    undeletable.add(existing.absolutePath)
+                    // deleteRecursively 只要有一个子项 unlink 失败就整体返回 false，
+                    // 目录里会残留一堆旧文件，后面 copyDir 撞名时仍可能失败。
+                    // 这里再做一次逐项清理，能删多少删多少，删不掉的记下来。
+                    deleteChildrenBestEffort(existing, undeletable)
+                    if (existing.listFiles()?.isEmpty() == true) {
+                        existing.delete()
+                    }
                 }
             }
         }
         if (undeletable.isNotEmpty()) {
             AppLogger.w(
                 TAG,
-                "restore: ${undeletable.size} 个旧条目无法删除（权限/挂载限制），已跳过并继续：" +
-                    undeletable.take(5).joinToString(", ")
+                "restore: ${undeletable.size} 个旧文件无法删除（正在被占用 / 挂载限制），" +
+                    "已跳过并继续，同名文件将被覆盖：${undeletable.take(5).joinToString(", ")}"
             )
         }
 
         if (!fromDir.exists() || !fromDir.isDirectory) return
         copyDir(fromDir, toDir, preservedTopLevelDirNames)
+    }
+
+    /**
+     * 尽最大努力删除目录内所有子项，删不掉的收集到 undeletable。
+     *
+     * 为什么 deleteRecursively 不够：它采用「全成功」语义，一个子项 unlink
+     * 失败就整体返回 false，但失败的往往只是少数被占用的文件，其余明明可以删。
+     * 这里改成逐项尝试，把能删的都删掉，只把真正删不掉的记下来，
+     * 让后续拷贝尽量少撞名。
+     *
+     * 典型场景（真机实测）：Android/data/包名/files/packages 里是运行中的
+     * ToolPkg 与脚本，被 JS 引擎持有句柄，FUSE 侧拒绝 unlink。
+     */
+    private fun deleteChildrenBestEffort(dir: File, undeletable: MutableList<String>) {
+        val children = dir.listFiles() ?: return
+        if (children.isEmpty()) return
+        for (child in children) {
+            if (child.isDirectory) {
+                deleteChildrenBestEffort(child, undeletable)
+                if (child.listFiles()?.isEmpty() == true && !child.delete()) {
+                    undeletable.add(child.absolutePath)
+                }
+            } else {
+                if (!child.delete()) {
+                    undeletable.add(child.absolutePath)
+                }
+            }
+        }
     }
 
     private fun copyDir(
