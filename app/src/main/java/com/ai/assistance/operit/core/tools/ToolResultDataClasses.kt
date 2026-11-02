@@ -901,10 +901,9 @@ data class BluetoothBleNotificationEntry(
 )
 
 /** Represents UI node structure for hierarchical display */
-@Serializable
-/** 单次 toTreeString 最多输出多少个节点。 */
 private const val MAX_TREE_NODES = 120
 
+@Serializable
 data class SimplifiedUINode(
         val className: String?,
         val text: String?,
