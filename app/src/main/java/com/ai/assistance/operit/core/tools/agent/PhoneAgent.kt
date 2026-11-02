@@ -659,7 +659,8 @@ class PhoneAgent(
         _stepCount++
         AppLogger.d("PhoneAgent", "[$agentId] _executeStep: begin, step=$_stepCount")
 
-        val screenshotLink = actionHandler.captureScreenshotForAgent()
+        // 用「等非黑帧」版本，避免切 App/冷启动时截到纯黑画面让模型瞎猜
+        val screenshotLink = actionHandler.captureScreenshotEnsuringContent()
         // [UI-TREE] 同时给截图和结构化 UI 树。
         //
         // 为什么需要：只有截图时模型得靠像素猜坐标，点偏是常态。
@@ -940,6 +941,56 @@ class ActionHandler(
     suspend fun readUiTreeForAgent(): String? = runCatching {
         toolImplementations.readUiTree()?.takeIf { it.isNotBlank() }
     }.getOrNull()
+
+    /**
+     * 截一张「有内容」的图。
+     *
+     * 冷启动、切 App、动画过渡期常截到纯黑帧，模型看到全黑只能瞎猜。
+     * 这里捕获后做一次亮度抽样，几乎全黑就等 250ms 重拍，最多 4 次。
+     *
+     * 采样方式：Bitmap 缩到 32x32 再统计，避免大图逐像素遍历（OOM 风险）。
+     */
+    suspend fun captureScreenshotEnsuringContent(): String? {
+        repeat(4) { attempt ->
+            val (bitmap, _) = toolImplementations.captureScreenshotBitmap(buildScreenshotTool())
+            val bmp = bitmap ?: return captureScreenshotForAgent()
+            val blank = isLikelyBlankFrame(bmp)
+            if (blank) {
+                AppLogger.d("ActionHandler", "[$agentId] 检测到黑帧，重试 ${attempt + 1}/4")
+                bmp.recycle()
+                delay(250)
+            } else {
+                val (link, _) = saveCompressedScreenshotFromBitmap(bmp)
+                bmp.recycle()
+                return link ?: captureScreenshotForAgent()
+            }
+        }
+        return captureScreenshotForAgent()
+    }
+
+    /**
+     * 判断画面是否几乎全黑。
+     *
+     * 缩到 32x32 采样（约 4KB），非黑像素占比低于 2% 视为黑帧。
+     * 只读不持有引用，调用方负责 recycle。
+     */
+    private fun isLikelyBlankFrame(bmp: Bitmap): Boolean {
+        return runCatching {
+            val small = Bitmap.createScaledBitmap(bmp, 32, 32, false)
+            var nonDark = 0
+            for (y in 0 until 32) {
+                for (x in 0 until 32) {
+                    val p = small.getPixel(x, y)
+                    val r = (p shr 16) and 0xFF
+                    val g = (p shr 8) and 0xFF
+                    val b = p and 0xFF
+                    if (r > 24 || g > 24 || b > 24) nonDark++
+                }
+            }
+            if (small !== bmp) small.recycle()
+            nonDark.toDouble() / (32 * 32) < 0.02
+        }.getOrDefault(false)
+    }
 
     suspend fun captureScreenshotForAgent(): String? {
         val showerCtx = resolveShowerUsageContext()
