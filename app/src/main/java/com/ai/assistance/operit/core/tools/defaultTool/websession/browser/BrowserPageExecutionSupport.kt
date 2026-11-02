@@ -2010,10 +2010,18 @@ internal fun StandardBrowserSessionTools.renderOpenTabs(
 internal fun StandardBrowserSessionTools.renderPageState(session: BrowserToolSession): String {
     val viewport =
         StandardBrowserSessionTools.browserHost?.currentViewportSize()
-            ?: Pair(
-                (session.viewportWidthPx ?: session.webView.width).coerceAtLeast(0),
-                (session.viewportHeightPx ?: session.webView.height).coerceAtLeast(0)
-            )
+            ?: run {
+                // [THREAD-FIX] session.webView.width/height 是 View 属性，
+                // 必须在主线程读。renderPageState 由 browser_* 工具在工具线程调用，
+                // 直接读会抛 "A WebView method was called on thread ..."。
+                val size = runOnMainSyncBlocking {
+                    Pair(session.webView.width, session.webView.height)
+                } ?: Pair(0, 0)
+                Pair(
+                    (session.viewportWidthPx ?: size.first).coerceAtLeast(0),
+                    (session.viewportHeightPx ?: size.second).coerceAtLeast(0)
+                )
+            }
     return buildString {
         appendLine("- Title: ${session.pageTitle.ifBlank { "about:blank" }}")
         appendLine("- URL: ${session.currentUrl.ifBlank { "about:blank" }}")

@@ -308,12 +308,41 @@ internal fun StandardBrowserSessionTools.requireSnapshotNode(
     return snapshot.nodesByRef[ref]
 }
 
+/**
+ * 在任意线程安全地读一次主线程数据。
+ *
+ * 已在主线程则直接执行；否则 post 到主线程并限时等待，超时返回 null。
+ * 用于 WebView 属性读取这类「必须在主线程、但调用方不在主线程」的场景。
+ */
+internal fun <T> runOnMainSyncBlocking(timeoutMs: Long = 800L, block: () -> T): T? {
+    val looper = android.os.Looper.myLooper()
+    if (looper != null && looper == android.os.Looper.getMainLooper()) {
+        return runCatching { block() }.getOrNull()
+    }
+    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    val latch = java.util.concurrent.CountDownLatch(1)
+    var result: T? = null
+    val posted = handler.post {
+        result = runCatching { block() }.getOrNull()
+        latch.countDown()
+    }
+    if (!posted) return null
+    return if (latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) result else null
+}
+
 internal fun StandardBrowserSessionTools.captureActionMarkers(
     session: BrowserToolSession
 ): BrowserToolActionMarkers =
     BrowserToolActionMarkers(
         initialSessionId = session.id,
-        initialUrl = readCurrentUrl(session.webView, session.currentUrl).ifBlank { session.currentUrl },
+        // [THREAD-FIX] 2026-11-02 真机实测崩溃：
+        //   A WebView method was called on thread 'Thread-451'.
+        //   All WebView methods must be called on the same thread.
+        // readCurrentUrl 内部调 webView.getUrl()/getTitle()，而 browser_* 工具
+        // 是跑在工具线程（非主线程）的。这里必须切主线程读，读不到就用缓存值。
+        initialUrl = runCatching {
+            runOnMainSyncBlocking { readCurrentUrl(session.webView, session.currentUrl) }
+        }.getOrNull().orEmpty().ifBlank { session.currentUrl },
         consoleTimestamp = latestConsoleTimestamp(session),
         downloadTimestamp = latestBrowserDownloadEventAt(),
         snapshotGeneration = session.lastSnapshot?.generation ?: 0L,
