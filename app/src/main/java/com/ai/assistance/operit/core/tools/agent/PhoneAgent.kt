@@ -128,17 +128,6 @@ class PhoneAgent(
     val stepCount: Int
         get() = _stepCount
 
-    /**
-     * Note 动作收集到的页面笔记。
-     *
-     * 用途：模型让「把这个页面记下来」时先暂存，Call_API 或任务收尾时
-     * 一并回灌上下文做总结。放内存里，reset() 时清空，不落盘。
-     */
-    private val notes = mutableListOf<String>()
-
-    /** Call_API 请求排队（instruction 原文），同样在 reset() 时清空。 */
-    private val callApiRequests = mutableListOf<String>()
-
     private val _contextHistory = mutableListOf<Pair<String, String>>()
     val contextHistory: List<Pair<String, String>>
         get() = _contextHistory.toList()
@@ -662,8 +651,6 @@ class PhoneAgent(
     /** Reset the agent state for a new task. */
     fun reset() {
         _contextHistory.clear()
-        notes.clear()
-        callApiRequests.clear()
         _stepCount = 0
     }
 
@@ -749,7 +736,7 @@ class PhoneAgent(
      *  - 成功但带 message 也回灌（例如 Note 计数、Call_API 排队）
      *  - 纯成功且无 message 不回灌，节省 token（截图已能体现）
      */
-    private fun buildActionFeedback(result: ActionExecResult): String? {
+    private fun buildActionFeedback(result: ActionHandler.ActionExecResult): String? {
         val msg = result.message?.takeIf { it.isNotBlank() } ?: return null
         return if (result.success) {
             "** Action Feedback **\n上一步动作成功：$msg"
@@ -865,6 +852,18 @@ class ActionHandler(
     private var screenHeight: Int,
     private val toolImplementations: ToolImplementations
 ) {
+
+    /**
+     * Note 动作收集到的页面笔记。
+     *
+     * 用途：模型让「把这个页面记下来」时先暂存，Call_API 或任务收尾时
+     * 一并回灌上下文做总结。只在内存，任务结束随实例回收。
+     */
+    private val notes = mutableListOf<String>()
+
+    /** Call_API 请求排队（instruction 原文）。 */
+    private val callApiRequests = mutableListOf<String>()
+
     private var agentId: String = "default"
     private var mainScreenShowerPrepared: Boolean = false
     private var appPackagesSyncedFromTool = false
